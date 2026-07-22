@@ -23,9 +23,10 @@ information no one asked it to touch.
   everything else (diffing, JSON output) is hand-rolled to keep the
   dependency footprint small.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
-  suite, `fixtures/invalid/` for error-path (parse failure) tests, and
+  suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
-  used by the `sg check`/`sg fix` test suite.
+  used by the `sg check`/`sg fix` test suite, and `fixtures/engine_project/` -
+  a minimal real Godot project - for `sg check --engine` (see below).
 
 ## Design
 
@@ -167,6 +168,97 @@ Rules, each tagged fixable or not:
 | `unused-ext-resource` / `unused-sub-resource` | warning | yes | Not reachable from any `[node]`/`[connection]`/`[resource]` section, directly or transitively through other reachable `sub_resource`s. |
 | `duplicate-ext-resource-id` / `duplicate-sub-resource-id` | error | no | The same id is declared by more than one `ext_resource`/`sub_resource` section (checked in separate namespaces, since `ExtResource("x")` and `SubResource("x")` never collide). |
 
+## `sg check --engine`
+
+The rules above are `sg`'s own static judgment: they only ever validate ids
+declared *within* a file (does `ExtResource("x")` resolve to some
+`ext_resource` id also declared in this file?), never whether the path that
+id's `ext_resource` section actually points to exists on disk. `--engine`
+closes that gap by handing each file to a real, headless Godot instance and
+trusting its judgment instead: a small generated GDScript loads the file
+through Godot's own `ResourceLoader`, checks every dependency Godot itself
+reports for it (`ResourceLoader.get_dependencies` + `ResourceLoader.exists`),
+and separately checks that `ResourceLoader.load()` doesn't return `null`. That
+second, dependency-existence check matters on its own: a `PackedScene` with an
+`ext_resource` `path` pointing at nothing still loads without error in
+Godot's own loader, so a bare "did it return `null`" check misses exactly the
+kind of broken reference `--engine` exists to catch.
+
+Static checks are the default because they're instant and need nothing
+installed. Use `--engine` as the ground-truth pass - before a commit, or in
+CI - once the static checks are already clean, since it costs a Godot process
+launch per project.
+
+### Requirements
+
+`--engine` needs a Godot 4.x executable. `sg` looks for one in this order,
+stopping at the first tier that's set at all (an explicit
+`--godot-path`/`SG_GODOT` that doesn't point at a real, executable file is a
+hard error - it does not fall through to the next tier):
+
+1. `--godot-path <path>` on the command line.
+2. the `SG_GODOT` environment variable.
+3. `godot4`, then `godot`, on `PATH`.
+
+If none of these resolve, `sg` exits with an error listing exactly what it
+checked, e.g.:
+
+```
+error: could not find a Godot executable for --engine. Checked, in order: (1) --godot-path flag: not given; (2) SG_GODOT environment variable: not set; (3) 'godot4' or 'godot' on PATH: not found. Pass --godot-path <path>, set SG_GODOT, or add a Godot 4.x executable named 'godot4' or 'godot' to PATH.
+```
+
+`.godot-bin/` at the repository root is git-ignored specifically as a
+conventional local drop location for a downloaded Godot editor binary, so you
+can keep one around per-checkout without it ever being staged:
+
+```sh
+sg check fixtures/ --engine --godot-path .godot-bin/Godot_v4.7.1-stable_win64.exe
+```
+
+On Windows, PATH search for `godot4`/`godot` also matches `.exe`, `.cmd`, and
+`.bat` variants of that name, not just an extension-less file.
+
+### Example
+
+Given `fixtures/engine_project/broken.tscn`, whose `ext_resource` points at a
+script that doesn't exist:
+
+```sh
+$ sg check fixtures/engine_project/valid.tscn fixtures/engine_project/broken.tscn --engine --godot-path .godot-bin/Godot_v4.7.1-stable_win64.exe
+fixtures/engine_project/broken.tscn:1: error [engine-load-failed] Godot failed to load 'res://broken.tscn': missing dependency: res://scripts/does_not_exist.gd
+```
+
+`valid.tscn` produced no line at all - the engine loaded it cleanly. Every
+file passed to `--engine` must sit inside a directory tree with a
+`project.godot` above it somewhere (that's what gives a file's `res://` path
+meaning); files that don't are reported as `engine-project-not-found` instead
+of being handed to Godot. Files under the same `project.godot` are verified
+together in a single Godot process launch, so checking many scenes in one
+project costs one engine startup, not one per file.
+
+### Timeout
+
+`--engine-timeout <seconds>` bounds how long the headless Godot process for
+one project is allowed to run before `sg` kills it and reports
+`engine-timeout` for every file in that project that hadn't already reported
+a result. Default: `30` seconds.
+
+### Exit codes
+
+`--engine` issues (`engine-load-failed`, `engine-timeout`,
+`engine-project-not-found`, and `engine-run-failed` for a Godot process that
+exited without reporting a result) are never fixable and fold into the same
+exit code `1` as any static issue found. On top of the exit codes already
+described for `sg check`, `--engine` adds one more: exit code `3` means
+engine verification could not run *at all* - no Godot binary could be found,
+or the Godot process itself could not be started - and always wins over
+whatever exit code the static results alone would have produced, since it
+means the engine pass never happened, not that it passed. The engine pass
+also never runs at all if any input file already failed to parse (exit code
+`2`): there's nothing meaningful to hand Godot, and running a slow engine
+pass over the files that did parse would just delay reporting a failure
+that's already final.
+
 ## `sg fix`
 
 Repairs everything `sg check` marks fixable, in place, and leaves
@@ -221,3 +313,17 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+## License
+
+This project is licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
