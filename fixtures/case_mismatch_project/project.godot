@@ -1,0 +1,11 @@
+; Engine Configuration File.
+; Minimal fixture project used by crates/sg's static ext_resource-path
+; check tests to exercise case-mismatch detection against a real
+; directory listing. See README.md, "sg check" rules table.
+
+config_version=5
+
+[application]
+
+config/name="sg_case_mismatch_fixture"
+config/features=PackedStringArray("4.3")

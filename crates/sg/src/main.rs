@@ -6,6 +6,7 @@ mod engine;
 mod fix;
 mod json;
 mod paths;
+mod respath;
 mod rules;
 
 use std::fs;
@@ -244,7 +245,7 @@ fn cmd_check(paths: &[PathBuf], json: bool, engine: bool, godot_path: Option<&Pa
         };
         match Document::parse(&source) {
             Ok(doc) => {
-                let issues = rules::check(&doc);
+                let issues = rules::check(&doc, file);
                 if !issues.is_empty() {
                     had_issue = true;
                 }

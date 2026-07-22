@@ -28,13 +28,13 @@ pub struct FixResult {
 /// decide whether to write `new_source` back out.
 pub fn fix_file(path: &Path, source: &str, keep_unused: bool) -> Result<FixResult, ParseError> {
     let doc = Document::parse(source)?;
-    let before = rules::check(&doc);
+    let before = rules::check(&doc, path);
     let plan = rules::plan_fix(&doc, keep_unused);
     let edits = build_edits(&doc, &plan);
 
     let fixed_doc = if edits.is_empty() { doc } else { doc.apply_edits(edits) };
     let new_source = fixed_doc.serialize();
-    let after = rules::check(&fixed_doc);
+    let after = rules::check(&fixed_doc, path);
     let changed = new_source != source;
     let diff = diff::unified_diff(&path.display().to_string(), source, &new_source);
 

@@ -159,6 +159,95 @@ fn composite_fixture_has_only_fixable_warnings() {
 }
 
 // ---------------------------------------------------------------------
+// ext_resource path existence / case on disk (no --engine involved)
+// ---------------------------------------------------------------------
+
+#[test]
+fn detects_missing_ext_resource_path_without_engine() {
+    // No `--engine` flag here at all: this is the static rule closing the
+    // gap the README used to describe as engine-only.
+    let path = fixtures_dir().join("engine_project").join("broken.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"missing-ext-resource-path\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+    assert!(json.contains("\"fixable\":false"), "{json}");
+    assert!(json.contains("res://scripts/does_not_exist.gd"), "{json}");
+}
+
+#[test]
+fn valid_ext_resource_path_stays_clean_without_engine() {
+    let path = fixtures_dir().join("engine_project").join("valid.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json, "[]");
+}
+
+#[test]
+fn detects_ext_resource_path_case_mismatch() {
+    let path = fixtures_dir().join("case_mismatch_project").join("scene.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"ext-resource-path-case-mismatch\""), "{json}");
+    assert!(json.contains("\"severity\":\"warning\""), "{json}");
+    assert!(json.contains("\"fixable\":false"), "{json}");
+    // The path as written, and the actual on-disk casing, must both
+    // appear in the message.
+    assert!(json.contains("res://scripts/player.gd"), "{json}");
+    assert!(json.contains("res://scripts/Player.gd"), "{json}");
+}
+
+#[test]
+fn files_without_a_project_root_are_silently_skipped_for_path_checks() {
+    // fixtures/broken/08_composite.tscn declares ext_resource sections
+    // whose res:// paths don't exist anywhere on disk, but the fixture
+    // has no project.godot ancestor - a res:// path is meaningless
+    // without one, so the new rules must never fire here (that case is
+    // `sg check --engine`'s `engine-project-not-found` territory, not a
+    // new issue kind).
+    let (_code, json) = run_check_json(&broken_fixture("08_composite.tscn"));
+    assert!(!json.contains("missing-ext-resource-path"), "{json}");
+    assert!(!json.contains("ext-resource-path-case-mismatch"), "{json}");
+}
+
+#[test]
+fn fix_does_not_touch_or_panic_on_missing_ext_resource_path() {
+    // Not fixable: `sg fix` must leave the file untouched and still
+    // report the issue afterward, exactly like other unfixable rules.
+    let dir = std::env::temp_dir().join(format!(
+        "sg-check-fix-test-missing-path-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("project.godot"), "").unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"Script\" path=\"res://missing.gd\" id=\"1_missing\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "script = ExtResource(\"1_missing\")\n",
+        ),
+    )
+    .unwrap();
+    let original = read(&scene);
+
+    let (code, _out, _err) = run_fix(&scene, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(read(&scene), original, "unfixable file must not be modified at all");
+
+    let (check_code, json) = run_check_json(&scene);
+    assert_eq!(check_code, 1);
+    assert!(json.contains("missing-ext-resource-path"), "{json}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------
 // Fixing (sg fix): exact byte-for-byte output where hand-derived
 // ---------------------------------------------------------------------
 

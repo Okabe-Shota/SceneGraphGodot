@@ -8,8 +8,12 @@
 //! about what "forward reference" or "unused" means.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::Path;
 
 use scenegraph_core::{collect_references, parse_complete, Document, Reference, ReferenceKind, SectionInfo};
+
+use crate::paths::find_project_root;
+use crate::respath::{check_res_path, DirCache, PathCheck};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -272,8 +276,11 @@ fn compute_used(sections: &[SectionInfo], sub_first: &HashMap<String, usize>) ->
     (used_ext, used_sub)
 }
 
-/// Report every problem currently present in `doc`.
-pub fn check(doc: &Document) -> Vec<Issue> {
+/// Report every problem currently present in `doc`. `file` is `doc`'s
+/// source path on disk - used only by the ext_resource-path-on-disk rule
+/// (rule 7 below) to find the file's Godot project root; every other rule
+/// only ever looks at ids declared within `doc` itself.
+pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
     let sections = doc.sections();
     let line = |i: usize| doc.section_line(i).unwrap_or(0);
     let mut issues = Vec::new();
@@ -473,6 +480,52 @@ pub fn check(doc: &Document) -> Vec<Issue> {
                 ),
                 fixable: true,
             });
+        }
+    }
+
+    // Rule 7: ext_resource path existence and case on disk. Only runs when
+    // `file` sits inside a discoverable Godot project (nearest ancestor
+    // directory containing `project.godot`) - without that, a `res://`
+    // path has nothing to resolve against, and `sg check --engine` already
+    // reports `engine-project-not-found` for that case; this rule silently
+    // skips the file instead of duplicating that report (see the module
+    // doc comment on `find_project_root`, shared with `crate::engine` via
+    // `crate::paths`). Only `path` attributes are inspected - `uid`
+    // attributes and non-`res://` paths (e.g. `uid://...`) are untouched.
+    if let Some(project_root) = find_project_root(file) {
+        let mut dir_cache = DirCache::new();
+        for &i in &ext_indices {
+            let Some(path_attr) = attr_str(&sections[i], "path") else {
+                continue;
+            };
+            let Some(res_relative) = path_attr.strip_prefix("res://") else {
+                continue;
+            };
+            let id = attr_str(&sections[i], "id").unwrap_or("?");
+            match check_res_path(&project_root, res_relative, &mut dir_cache) {
+                PathCheck::Exact => {}
+                PathCheck::CaseMismatch { actual_relative } => {
+                    issues.push(Issue {
+                        code: "ext-resource-path-case-mismatch",
+                        severity: Severity::Warning,
+                        line: line(i),
+                        message: format!(
+                            "ext_resource \"{id}\" path \"{path_attr}\" exists on disk but with \
+                             different case (actual: \"res://{actual_relative}\")"
+                        ),
+                        fixable: false,
+                    });
+                }
+                PathCheck::Missing => {
+                    issues.push(Issue {
+                        code: "missing-ext-resource-path",
+                        severity: Severity::Error,
+                        line: line(i),
+                        message: format!("ext_resource \"{id}\" path \"{path_attr}\" does not exist on disk"),
+                        fixable: false,
+                    });
+                }
+            }
         }
     }
 

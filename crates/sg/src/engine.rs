@@ -10,11 +10,13 @@
 //! ## Design
 //!
 //! 1. For each target file, walk upward from its directory looking for a
-//!    `project.godot` ([`find_project_root`]) - that directory is the only
-//!    thing that gives a `res://` path ([`to_res_path`]) meaning. A file
-//!    with no `project.godot` above it is unrooted and reported as an
-//!    `engine-project-not-found` issue instead of being handed to Godot at
-//!    all.
+//!    `project.godot` ([`find_project_root`] - shared with the static
+//!    ext_resource-path-on-disk rules in [`crate::rules`] via
+//!    [`crate::paths`], so both agree on exactly what a file's `res://`
+//!    root is) - that directory is the only thing that gives a `res://`
+//!    path ([`to_res_path`]) meaning. A file with no `project.godot` above
+//!    it is unrooted and reported as an `engine-project-not-found` issue
+//!    instead of being handed to Godot at all.
 //! 2. Files are grouped by project root ([`group_by_project`]) so every
 //!    file belonging to the same Godot project is verified by a single
 //!    Godot process launch, amortizing engine startup cost; a checkout
@@ -44,6 +46,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::paths::find_project_root;
 use crate::rules::{Issue, Severity};
 
 /// GDScript run inside the target project by [`validate_group`]. Must
@@ -229,24 +232,6 @@ fn is_executable_file(p: &Path) -> bool {
 // ---------------------------------------------------------------------
 // Project discovery and res:// resolution
 // ---------------------------------------------------------------------
-
-/// Walk upward from `file`'s directory looking for `project.godot`,
-/// returning the first ancestor directory that contains one. Resolves
-/// `file` to an absolute path first (lexically, via [`std::path::absolute`]
-/// - no filesystem access, no symlink resolution) so relative inputs like
-///   a bare `scene.tscn` (whose `Path::parent()` would otherwise be the
-///   empty path, terminating the walk after a single check) are handled the
-///   same as any other input.
-pub fn find_project_root(file: &Path) -> Option<PathBuf> {
-    let abs = std::path::absolute(file).ok()?;
-    let mut dir = abs.parent()?.to_path_buf();
-    loop {
-        if dir.join("project.godot").is_file() {
-            return Some(dir);
-        }
-        dir = dir.parent()?.to_path_buf();
-    }
-}
 
 /// Express `file` as a `res://`-relative path within `project_root`.
 /// `None` if `file` is not lexically inside `project_root` at all, or if
@@ -793,36 +778,9 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    // -- find_project_root ------------------------------------------------
-
-    #[test]
-    fn finds_project_root_several_levels_up() {
-        let root = fresh_temp_dir("proj-root");
-        fs::write(root.join("project.godot"), "").unwrap();
-        let nested = root.join("a").join("b");
-        fs::create_dir_all(&nested).unwrap();
-        let file = nested.join("scene.tscn");
-        fs::write(&file, "").unwrap();
-
-        let found = find_project_root(&file).unwrap();
-        assert_eq!(
-            std::path::absolute(&found).unwrap(),
-            std::path::absolute(&root).unwrap()
-        );
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn returns_none_when_no_project_godot_exists() {
-        let dir = fresh_temp_dir("no-proj");
-        let file = dir.join("scene.tscn");
-        fs::write(&file, "").unwrap();
-        // `dir` itself has no project.godot, and (barring an actual Godot
-        // project somewhere above the OS temp dir, which would be
-        // pathological) neither does anything above it.
-        assert_eq!(find_project_root(&file), None);
-        fs::remove_dir_all(&dir).ok();
-    }
+    // `find_project_root`'s own unit tests now live in
+    // crates/sg/src/paths.rs, where the function itself moved to be
+    // shared with the static ext_resource-path-on-disk rules.
 
     // -- to_res_path --------------------------------------------------------
 
