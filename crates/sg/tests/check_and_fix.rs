@@ -158,6 +158,41 @@ fn composite_fixture_has_only_fixable_warnings() {
     assert!(!json.contains("\"severity\":\"error\""), "{json}");
 }
 
+#[test]
+fn detects_broken_connection_node_path_as_unfixable_error() {
+    let (code, json) = run_check_json(&broken_fixture("09_broken_connection_node_path.tscn"));
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"broken-connection-node-path\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+    assert!(json.contains("\"fixable\":false"), "{json}");
+    assert!(json.contains("from=\\\"Buttn\\\""), "{json}");
+}
+
+#[test]
+fn connection_into_instanced_child_scene_stays_clean() {
+    // "Enemies" is an instanced sub-scene; "Enemies/Slime" is declared only
+    // inside that sub-scene, which this file cannot see - must not be
+    // reported as a broken connection target.
+    let path = fixtures_dir().join("12_connection_into_instanced_child.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json, "[]");
+}
+
+#[test]
+fn fix_does_not_touch_or_panic_on_broken_connection_node_path() {
+    let path = broken_fixture("09_broken_connection_node_path.tscn");
+    let original = read(&path);
+    let temp = copy_to_temp("09_broken_connection_node_path.tscn");
+    let (code, _out, _err) = run_fix(&temp, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(read(&temp), original, "unfixable file must not be modified at all");
+
+    let (check_code, json) = run_check_json(&temp);
+    assert_eq!(check_code, 1);
+    assert!(json.contains("broken-connection-node-path"), "{json}");
+}
+
 // ---------------------------------------------------------------------
 // ext_resource path existence / case on disk (no --engine involved)
 // ---------------------------------------------------------------------

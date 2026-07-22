@@ -128,6 +128,14 @@ struct NodeGraph {
     parent_of: HashMap<usize, usize>,
     roots: Vec<usize>,
     orphans: Vec<(usize, String)>, // (node index, unresolved parent path)
+    /// Every node's own root-relative path (see [`node_full_path`]) -> its
+    /// section index. This is the full set of paths *declared* in this
+    /// file, independent of whether the node's own `parent=` attribute
+    /// happens to resolve to anything (an orphan still declares its own
+    /// path just fine - see rule 4's `orphans` for that separate concern).
+    /// Used by the `broken-connection-node-path` rule to resolve
+    /// `[connection]` `from=`/`to=` targets.
+    path_to_index: HashMap<String, usize>,
 }
 
 fn build_node_graph(sections: &[SectionInfo]) -> NodeGraph {
@@ -164,7 +172,48 @@ fn build_node_graph(sections: &[SectionInfo]) -> NodeGraph {
         parent_of,
         roots,
         orphans,
+        path_to_index,
     }
+}
+
+/// Whether `section` carries an attribute named `key` at all, regardless
+/// of its value's type. Used for `instance`/`instance_placeholder`, whose
+/// values are not plain strings (`instance=ExtResource(...)`), so
+/// [`attr_str`] can't be used to detect their mere presence.
+fn has_attr(section: &SectionInfo, key: &str) -> bool {
+    section.attrs.iter().any(|(k, _)| k == key)
+}
+
+/// A node section is "instanced" when it stands in for the root of a
+/// scene this file cannot see into: either a full instantiation
+/// (`instance=ExtResource(...)`) or an editor instance placeholder
+/// (`instance_placeholder="res://..."`). Either way, anything declared
+/// underneath it in the *instanced* scene is invisible here.
+fn is_instanced(section: &SectionInfo) -> bool {
+    has_attr(section, "instance") || has_attr(section, "instance_placeholder")
+}
+
+/// Every strict ancestor path of `path`, in the same `.` / `Name` /
+/// `Parent/Name` notation used throughout this module - `path` itself is
+/// never included. The root (`"."`) has no strict prefixes.
+///
+/// Example: `"Panel/Button/Icon"` -> `["Panel", "Panel/Button"]`.
+fn strict_prefixes(path: &str) -> Vec<String> {
+    if path == "." {
+        return Vec::new();
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    (1..segments.len()).map(|end| segments[..end].join("/")).collect()
+}
+
+/// Conservative bail-out for NodePath syntax this rule does not attempt to
+/// reason about: `%unique_name` lookups, `@`-prefixed paths, `..` parent
+/// traversal, and `:subpath` property paths can all resolve to something
+/// this file's flat node-path set does not literally contain, even when
+/// the connection is perfectly valid. See the module-level rule
+/// documentation.
+fn is_opaque_node_path(path: &str) -> bool {
+    path.contains('%') || path.contains('@') || path.contains("..") || path.contains(':')
 }
 
 /// Stable topological sort of `nodes` respecting `depends_on` (an edge `i
@@ -428,6 +477,51 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
         }
     }
 
+    // Rule 8: connection endpoints must resolve to a node declared in this
+    // file. Skipped entirely when the file's own root node is itself an
+    // instance (an inherited scene, e.g. `[node name="X"
+    // instance=ExtResource(...)]` with no `parent=`): its connections may
+    // legitimately target nodes declared only in the base scene, which
+    // this file never redeclares. `graph.roots.first()` mirrors the
+    // "multiple-root-nodes" rule above: the first node with no `parent=`
+    // attribute, in file order, is the file's root.
+    let root_is_instance = graph.roots.first().is_some_and(|&r| is_instanced(&sections[r]));
+    if !root_is_instance {
+        let connection_indices = section_indices_of(&sections, "connection");
+        for &i in &connection_indices {
+            let s = &sections[i];
+            for attr_key in ["from", "to"] {
+                let Some(path) = attr_str(s, attr_key) else {
+                    continue; // missing/non-string attribute: not this rule's job
+                };
+                if path.is_empty() || is_opaque_node_path(path) {
+                    continue;
+                }
+                if graph.path_to_index.contains_key(path) {
+                    continue; // resolves to a declared node (instanced or not)
+                }
+                let inside_instanced_scene = strict_prefixes(path).iter().any(|prefix| {
+                    graph
+                        .path_to_index
+                        .get(prefix)
+                        .is_some_and(|&idx| is_instanced(&sections[idx]))
+                });
+                if inside_instanced_scene {
+                    continue; // may live inside an instanced sub-scene this file cannot see
+                }
+                issues.push(Issue {
+                    code: "broken-connection-node-path",
+                    severity: Severity::Error,
+                    line: line(i),
+                    message: format!(
+                        "connection {attr_key}=\"{path}\" does not resolve to any node declared in this file"
+                    ),
+                    fixable: false,
+                });
+            }
+        }
+    }
+
     // Rule 5: unused resources.
     let (used_ext, used_sub) = compute_used(&sections, &sub_first);
     for &i in &ext_indices {
@@ -609,6 +703,264 @@ pub fn plan_fix(doc: &Document, keep_unused: bool) -> FixPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scenegraph_core::Value;
+
+    fn issue_codes(doc: &Document) -> Vec<&'static str> {
+        check(doc, Path::new("test.tscn")).iter().map(|i| i.code).collect()
+    }
+
+    // -----------------------------------------------------------------
+    // strict_prefixes
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strict_prefixes_of_root_is_empty() {
+        assert!(strict_prefixes(".").is_empty());
+    }
+
+    #[test]
+    fn strict_prefixes_of_direct_child_is_empty() {
+        // "Button" has no ancestor besides the implicit root, which is not
+        // spelled out in root-relative notation.
+        assert!(strict_prefixes("Button").is_empty());
+    }
+
+    #[test]
+    fn strict_prefixes_of_nested_path_lists_every_ancestor() {
+        assert_eq!(
+            strict_prefixes("Panel/Button/Icon"),
+            vec!["Panel".to_string(), "Panel/Button".to_string()]
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // is_opaque_node_path
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn opaque_path_detects_unique_name_syntax() {
+        assert!(is_opaque_node_path("%Button"));
+        assert!(is_opaque_node_path("Panel/%Button"));
+    }
+
+    #[test]
+    fn opaque_path_detects_at_prefix() {
+        assert!(is_opaque_node_path("@Button@1"));
+    }
+
+    #[test]
+    fn opaque_path_detects_parent_traversal() {
+        assert!(is_opaque_node_path("../Sibling"));
+    }
+
+    #[test]
+    fn opaque_path_detects_property_subpath() {
+        assert!(is_opaque_node_path("Sprite:frame"));
+    }
+
+    #[test]
+    fn opaque_path_accepts_ordinary_paths() {
+        assert!(!is_opaque_node_path("."));
+        assert!(!is_opaque_node_path("Button"));
+        assert!(!is_opaque_node_path("Panel/Button"));
+    }
+
+    // -----------------------------------------------------------------
+    // has_attr / is_instanced
+    // -----------------------------------------------------------------
+
+    fn section_with_attrs(kind: &str, attrs: Vec<(&str, Value)>) -> SectionInfo {
+        SectionInfo {
+            kind: kind.to_string(),
+            attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            properties: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn is_instanced_true_for_instance_attribute() {
+        let s = section_with_attrs(
+            "node",
+            vec![
+                ("name", Value::String("Enemies".into())),
+                (
+                    "instance",
+                    Value::Call {
+                        name: "ExtResource".into(),
+                        args: vec![Value::String("1_enemy".into())],
+                    },
+                ),
+            ],
+        );
+        assert!(is_instanced(&s));
+    }
+
+    #[test]
+    fn is_instanced_true_for_instance_placeholder_attribute() {
+        let s = section_with_attrs(
+            "node",
+            vec![
+                ("name", Value::String("Enemies".into())),
+                ("instance_placeholder", Value::String("res://enemy.tscn".into())),
+            ],
+        );
+        assert!(is_instanced(&s));
+    }
+
+    #[test]
+    fn is_instanced_false_for_plain_node() {
+        let s = section_with_attrs("node", vec![("name", Value::String("Main".into()))]);
+        assert!(!is_instanced(&s));
+    }
+
+    // -----------------------------------------------------------------
+    // broken-connection-node-path: end-to-end via check()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reports_broken_connection_from_target() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let issues = check(&doc, Path::new("test.tscn"));
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|i| i.code == "broken-connection-node-path")
+                .count(),
+            1,
+            "{issues:?}"
+        );
+        let issue = issues.iter().find(|i| i.code == "broken-connection-node-path").unwrap();
+        assert_eq!(issue.severity, Severity::Error);
+        assert!(!issue.fixable);
+        assert_eq!(issue.line, 5);
+        assert!(issue.message.contains("from=\"Button\""), "{}", issue.message);
+    }
+
+    #[test]
+    fn reports_broken_connection_to_target() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\".\" to=\"Missing\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let codes = issue_codes(&doc);
+        assert_eq!(codes, vec!["broken-connection-node-path"]);
+    }
+
+    #[test]
+    fn valid_connections_are_clean() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Button\" type=\"Button\" parent=\".\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\"Button\" to=\".\" method=\"_on_button_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(issue_codes(&doc).is_empty());
+    }
+
+    #[test]
+    fn connection_into_instanced_child_scene_is_skipped() {
+        // "Enemies" is an instanced sub-scene; "Enemies/Slime" is declared
+        // only inside that sub-scene, invisible to this file.
+        let src = concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"PackedScene\" path=\"res://enemy.tscn\" id=\"1_enemy\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Enemies\" parent=\".\" instance=ExtResource(\"1_enemy\")]\n",
+            "\n",
+            "[connection signal=\"died\" from=\"Enemies/Slime\" to=\".\" method=\"_on_died\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            issue_codes(&doc).is_empty(),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
+    }
+
+    #[test]
+    fn connection_referencing_the_instanced_node_itself_is_declared_and_clean() {
+        // The path resolves exactly to the instanced node's own declared
+        // path - that node IS declared here, so this is fine regardless of
+        // its instance= attribute.
+        let src = concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"PackedScene\" path=\"res://enemy.tscn\" id=\"1_enemy\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Enemies\" parent=\".\" instance=ExtResource(\"1_enemy\")]\n",
+            "\n",
+            "[connection signal=\"died\" from=\"Enemies\" to=\".\" method=\"_on_died\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(issue_codes(&doc).is_empty());
+    }
+
+    #[test]
+    fn inherited_scene_root_instance_skips_the_whole_rule() {
+        // The file's own root is itself an instance (an inherited scene) -
+        // even a wildly broken-looking connection target must not be
+        // reported, since it may resolve inside the base scene.
+        let src = concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"PackedScene\" path=\"res://base.tscn\" id=\"1_base\"]\n",
+            "\n",
+            "[node name=\"Derived\" instance=ExtResource(\"1_base\")]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\"DoesNotExistAnywhere\" to=\".\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(issue_codes(&doc).is_empty());
+    }
+
+    #[test]
+    fn opaque_paths_in_connections_are_skipped() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[connection signal=\"a\" from=\"%Button\" to=\".\" method=\"m1\"]\n",
+            "[connection signal=\"b\" from=\"../Sibling\" to=\".\" method=\"m2\"]\n",
+            "[connection signal=\"c\" from=\"Node@1\" to=\".\" method=\"m3\"]\n",
+            "[connection signal=\"d\" from=\"Sprite:frame\" to=\".\" method=\"m4\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(issue_codes(&doc).is_empty());
+    }
+
+    #[test]
+    fn root_reference_via_dot_resolves() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\".\" to=\".\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(issue_codes(&doc).is_empty());
+    }
 
     #[test]
     fn stable_topo_sort_preserves_already_valid_order() {

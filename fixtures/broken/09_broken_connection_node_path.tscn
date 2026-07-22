@@ -1,0 +1,7 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Main" type="Node2D"]
+
+[node name="Button" type="Button" parent="."]
+
+[connection signal="pressed" from="Buttn" to="." method="_on_button_pressed"]

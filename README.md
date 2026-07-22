@@ -172,6 +172,7 @@ Rules, each tagged fixable or not:
 | `duplicate-ext-resource-id` / `duplicate-sub-resource-id` | error | no | The same id is declared by more than one `ext_resource`/`sub_resource` section (checked in separate namespaces, since `ExtResource("x")` and `SubResource("x")` never collide). |
 | `missing-ext-resource-path` | error | no | An `ext_resource`'s `path="res://..."` does not resolve to any file on disk under the file's Godot project root (checked component-by-component against real directory listings; `uid=` attributes and non-`res://` paths are not checked). Skipped entirely for a file with no `project.godot` ancestor - see "Project-relative (`res://`) paths" below. |
 | `ext-resource-path-case-mismatch` | warning | no | An `ext_resource`'s `path="res://..."` exists on disk, but some path component differs from it only in character case. Harmless on case-insensitive filesystems (Windows, macOS) but breaks on Linux and in exported builds, which are case-sensitive. |
+| `broken-connection-node-path` | error | no | A `[connection]`'s `from=`/`to=` NodePath does not resolve to any node declared in this file. Conservatively skipped whenever the path could plausibly resolve elsewhere: it lives under a node with `instance=`/`instance_placeholder=` (an instanced sub-scene this file can't see into), it contains `%`/`@`/`..`/`:` (unique-name, special, parent-traversal, or property-subpath syntax), or the file's own root node is itself an instance (an inherited scene). |
 
 ### Project-relative (`res://`) paths
 
