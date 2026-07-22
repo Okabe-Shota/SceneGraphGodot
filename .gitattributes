@@ -1,0 +1,9 @@
+# Fixture files intentionally exercise exact byte-for-byte content,
+# including specific line endings (CRLF, mixed LF/CRLF, no trailing
+# newline, UTF-8 BOM). The global core.autocrlf=true setting would
+# otherwise normalize CRLF fixtures to LF in the git index (and back to
+# the platform's line ending on checkout), silently corrupting the very
+# bytes these tests assert on. Disable all text attribute handling for
+# everything under fixtures/ so git stores and checks out these files
+# byte-for-byte regardless of the user's global autocrlf setting.
+fixtures/** -text

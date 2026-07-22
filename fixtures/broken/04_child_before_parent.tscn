@@ -1,0 +1,6 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Child" type="Node2D" parent="."]
+
+[node name="Main" type="Node2D"]
+

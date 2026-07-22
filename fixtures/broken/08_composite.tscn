@@ -1,0 +1,18 @@
+[gd_scene load_steps=99 format=3]
+
+[ext_resource type="Texture2D" path="res://unused.png" id="1_unused"]
+
+[ext_resource type="Texture2D" path="res://used.png" id="2_used"]
+
+[sub_resource type="ShaderMaterial" id="mat_1"]
+shader_param/detail = SubResource("shader_1")
+
+[sub_resource type="Shader" id="shader_1"]
+code = "shader code"
+
+[node name="Child" type="Sprite2D" parent="."]
+texture = ExtResource("2_used")
+material = SubResource("mat_1")
+
+[node name="Main" type="Node2D"]
+

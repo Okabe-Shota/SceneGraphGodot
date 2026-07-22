@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="A" id="a"]
+link = SubResource("b")
+
+[sub_resource type="B" id="b"]
+link = SubResource("a")
+
+[node name="Main" type="Node2D"]
+value = SubResource("a")

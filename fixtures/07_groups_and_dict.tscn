@@ -1,4 +1,7 @@
-[gd_scene load_steps=1 format=3]
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="Resource" id="drop_table_1"]
+weight = 1.0
 
 [node name="Main" type="Node2D" groups=["enemies", "damageable"]]
 
@@ -12,4 +15,4 @@ metadata/_edit_lock = true
 metadata/_edit_group_ = true
 
 [node name="Loot" type="Node2D" parent="."]
-drop_rules = {"common": SubResource("does_not_exist"), "rare": null}
+drop_rules = {"common": SubResource("drop_table_1"), "rare": null}

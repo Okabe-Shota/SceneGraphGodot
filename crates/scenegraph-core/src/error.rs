@@ -1,6 +1,5 @@
 //! Error and diagnostic types. scenegraph-core never panics on malformed
 //! input; parse failures are always surfaced as values.
-
 use std::fmt;
 
 /// A single recoverable problem found while scanning the document.

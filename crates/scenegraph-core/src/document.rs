@@ -16,8 +16,8 @@ use crate::value::{self, ParsedHeader, Value};
 /// always untouched text.
 #[derive(Debug, Clone)]
 pub struct Document {
-    source: String,
-    raw: RawDocument,
+    pub(crate) source: String,
+    pub(crate) raw: RawDocument,
 }
 
 impl Document {
@@ -77,6 +77,14 @@ impl Document {
     /// Number of section headers (`[...]` blocks) in the document.
     pub fn section_count(&self) -> usize {
         self.raw.sections.len()
+    }
+
+    /// The 1-based line number of the `index`-th section's header (same
+    /// order as [`Document::sections`]). `None` if `index` is out of
+    /// range.
+    pub fn section_line(&self, index: usize) -> Option<usize> {
+        let section = self.raw.sections.get(index)?;
+        Some(crate::span::line_of(&self.source, section.header_span.start))
     }
 
     fn parsed_header(&self, section: &SectionChunk) -> Option<ParsedHeader> {

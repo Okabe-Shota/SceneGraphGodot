@@ -1,12 +1,20 @@
 //! `sg`: command-line tool for inspecting and validating Godot text
 //! resource files (`.tscn` / `.tres`) using scenegraph-core.
 
+mod diff;
+mod fix;
+mod json;
+mod paths;
+mod rules;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use scenegraph_core::Document;
+
+use rules::{Issue, Severity};
 
 #[derive(Parser)]
 #[command(name = "sg", about = "Inspect and validate Godot text resource files", version)]
@@ -29,6 +37,33 @@ enum Command {
         /// Path to a .tscn or .tres file.
         file: PathBuf,
     },
+    /// Report structural problems in .tscn/.tres files: load_steps
+    /// mismatches, broken/circular/duplicate resource references, nodes
+    /// declared before their parent, and unused resources.
+    Check {
+        /// Files or directories to check (directories are searched
+        /// recursively for *.tscn/*.tres).
+        paths: Vec<PathBuf>,
+        /// Emit a machine-readable JSON array instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fix everything `sg check` reports as mechanically fixable, in
+    /// place. Issues it cannot safely fix (broken/circular/duplicate
+    /// references, orphan nodes, multiple roots) are left in the file and
+    /// reported.
+    Fix {
+        /// Files or directories to fix (directories are searched
+        /// recursively for *.tscn/*.tres).
+        paths: Vec<PathBuf>,
+        /// Show what would change (including a unified diff) without
+        /// writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not delete unused ext_resource/sub_resource sections.
+        #[arg(long)]
+        keep_unused: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -36,6 +71,12 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Parse { file } => cmd_parse(&file),
         Command::Roundtrip { file } => cmd_roundtrip(&file),
+        Command::Check { paths, json } => cmd_check(&paths, json),
+        Command::Fix {
+            paths,
+            dry_run,
+            keep_unused,
+        } => cmd_fix(&paths, dry_run, keep_unused),
     }
 }
 
@@ -141,4 +182,135 @@ fn cmd_roundtrip(path: &Path) -> ExitCode {
     eprintln!("  serialized: ...{}...", context(b, mismatch));
 
     ExitCode::FAILURE
+}
+
+fn print_issue_line(file: &Path, issue: &Issue) {
+    println!(
+        "{}:{}: {} [{}] {}",
+        file.display(),
+        issue.line,
+        issue.severity.as_str(),
+        issue.code,
+        issue.message
+    );
+}
+
+fn parse_error_issue(e: &scenegraph_core::ParseError) -> Issue {
+    Issue {
+        code: "parse-error",
+        severity: Severity::Error,
+        line: e.line,
+        message: e.message.clone(),
+        fixable: false,
+    }
+}
+
+fn cmd_check(paths: &[PathBuf], json: bool) -> ExitCode {
+    let files = paths::collect_target_files(paths);
+    let mut all: Vec<(PathBuf, Issue)> = Vec::new();
+    let mut had_parse_error = false;
+    let mut had_issue = false;
+
+    for file in &files {
+        let source = match read_source(file) {
+            Ok(s) => s,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                had_parse_error = true;
+                continue;
+            }
+        };
+        match Document::parse(&source) {
+            Ok(doc) => {
+                let issues = rules::check(&doc);
+                if !issues.is_empty() {
+                    had_issue = true;
+                }
+                for issue in issues {
+                    all.push((file.clone(), issue));
+                }
+            }
+            Err(e) => {
+                had_parse_error = true;
+                all.push((file.clone(), parse_error_issue(&e)));
+            }
+        }
+    }
+
+    if json {
+        println!("{}", json::issues_array(&all));
+    } else {
+        for (file, issue) in &all {
+            print_issue_line(file, issue);
+        }
+    }
+
+    if had_parse_error {
+        ExitCode::from(2)
+    } else if had_issue {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn cmd_fix(paths: &[PathBuf], dry_run: bool, keep_unused: bool) -> ExitCode {
+    let files = paths::collect_target_files(paths);
+    let mut had_parse_error = false;
+    let mut had_remaining = false;
+
+    for file in &files {
+        let source = match read_source(file) {
+            Ok(s) => s,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                had_parse_error = true;
+                continue;
+            }
+        };
+
+        let result = match fix::fix_file(file, &source, keep_unused) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: parse error: {e}", file.display());
+                had_parse_error = true;
+                continue;
+            }
+        };
+
+        let fixed_count = result.before.iter().filter(|i| i.fixable).count();
+        if dry_run {
+            if result.changed {
+                println!("{}: would fix {fixed_count} issue(s)", file.display());
+                print!("{}", result.diff);
+            } else {
+                println!("{}: clean", file.display());
+            }
+        } else if result.changed {
+            match fs::write(file, &result.new_source) {
+                Ok(()) => println!("{}: fixed {fixed_count} issue(s)", file.display()),
+                Err(e) => {
+                    eprintln!("error: failed to write '{}': {e}", file.display());
+                    had_remaining = true;
+                }
+            }
+        } else {
+            println!("{}: clean", file.display());
+        }
+
+        for issue in &result.after {
+            print_issue_line(&result.path, issue);
+        }
+        if !result.after.is_empty() {
+            had_remaining = true;
+        }
+    }
+
+    if had_parse_error {
+        ExitCode::from(2)
+    } else if had_remaining {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }

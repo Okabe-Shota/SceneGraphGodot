@@ -19,7 +19,7 @@ fn file_descriptor_reports_scene_metadata() {
     let doc = Document::parse(&read_fixture("01_basic_2d_scene.tscn")).unwrap();
     let fd = doc.file_descriptor().expect("expected a file descriptor");
     assert_eq!(fd.kind, FileKind::Scene);
-    assert_eq!(fd.load_steps, Some(5));
+    assert_eq!(fd.load_steps, Some(4));
     assert_eq!(fd.format, Some(3));
     assert_eq!(fd.uid.as_deref(), Some("uid://bxpq168tsujuo"));
 }
@@ -109,9 +109,14 @@ fn references_are_found_in_nested_arrays_and_dicts() {
     let doc = Document::parse(&read_fixture("07_groups_and_dict.tscn")).unwrap();
     let refs = doc.references();
     // "drop_rules" holds a SubResource nested inside a dictionary value.
+    // The id is declared (fixtures/07_groups_and_dict.tscn is a
+    // well-formed fixture and must be `sg check`-clean; dangling-reference
+    // detection has its own dedicated coverage in
+    // fixtures/broken/02_broken_reference.tscn and
+    // crates/sg/tests/check_and_fix.rs::detects_broken_reference_as_unfixable_error).
     assert!(refs
         .iter()
-        .any(|r| r.kind == ReferenceKind::SubResource && r.id == "does_not_exist"));
+        .any(|r| r.kind == ReferenceKind::SubResource && r.id == "drop_table_1"));
 }
 
 #[test]

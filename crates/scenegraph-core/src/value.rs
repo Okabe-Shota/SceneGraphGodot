@@ -18,6 +18,7 @@
 //! bare identifier followed by a parenthesized argument list.
 
 use crate::error::ValueError;
+use crate::span::Span;
 
 /// A parsed variant literal.
 #[derive(Debug, Clone, PartialEq)]
@@ -292,7 +293,12 @@ fn lex_number(text: &str, start: usize) -> Result<(Tok, usize), ValueError> {
     }
 }
 
-fn tokenize(text: &str) -> Result<Vec<(Tok, usize)>, ValueError> {
+/// Tokenize `text`, recording each token's `(start, end)` byte offsets
+/// alongside it. The end offsets let callers (see
+/// [`parse_header_inner_spanned`]) recover the exact byte span consumed
+/// by a parsed value, which `sg fix` needs to rewrite a single header
+/// attribute's value without touching any other byte.
+fn tokenize(text: &str) -> Result<Vec<(Tok, usize, usize)>, ValueError> {
     let bytes = text.as_bytes();
     let mut i = 0;
     let mut out = Vec::new();
@@ -301,53 +307,53 @@ fn tokenize(text: &str) -> Result<Vec<(Tok, usize)>, ValueError> {
         match b {
             b' ' | b'\t' | b'\r' | b'\n' => i += 1,
             b'(' => {
-                out.push((Tok::LParen, i));
+                out.push((Tok::LParen, i, i + 1));
                 i += 1;
             }
             b')' => {
-                out.push((Tok::RParen, i));
+                out.push((Tok::RParen, i, i + 1));
                 i += 1;
             }
             b'[' => {
-                out.push((Tok::LBracket, i));
+                out.push((Tok::LBracket, i, i + 1));
                 i += 1;
             }
             b']' => {
-                out.push((Tok::RBracket, i));
+                out.push((Tok::RBracket, i, i + 1));
                 i += 1;
             }
             b'{' => {
-                out.push((Tok::LBrace, i));
+                out.push((Tok::LBrace, i, i + 1));
                 i += 1;
             }
             b'}' => {
-                out.push((Tok::RBrace, i));
+                out.push((Tok::RBrace, i, i + 1));
                 i += 1;
             }
             b',' => {
-                out.push((Tok::Comma, i));
+                out.push((Tok::Comma, i, i + 1));
                 i += 1;
             }
             b':' => {
-                out.push((Tok::Colon, i));
+                out.push((Tok::Colon, i, i + 1));
                 i += 1;
             }
             b'=' => {
-                out.push((Tok::Eq, i));
+                out.push((Tok::Eq, i, i + 1));
                 i += 1;
             }
             b'&' => {
-                out.push((Tok::Amp, i));
+                out.push((Tok::Amp, i, i + 1));
                 i += 1;
             }
             b'"' => {
                 let (s, end) = decode_string(text, i)?;
-                out.push((Tok::Str(s), i));
+                out.push((Tok::Str(s), i, end));
                 i = end;
             }
             _ if is_number_lead(bytes, i) => {
                 let (tok, end) = lex_number(text, i)?;
-                out.push((tok, i));
+                out.push((tok, i, end));
                 i = end;
             }
             _ if b.is_ascii_alphabetic() || b == b'_' => {
@@ -356,7 +362,7 @@ fn tokenize(text: &str) -> Result<Vec<(Tok, usize)>, ValueError> {
                 while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                     j += 1;
                 }
-                out.push((Tok::Ident(text[start..j].to_string()), start));
+                out.push((Tok::Ident(text[start..j].to_string()), start, j));
                 i = j;
             }
             other => {
@@ -367,13 +373,18 @@ fn tokenize(text: &str) -> Result<Vec<(Tok, usize)>, ValueError> {
             }
         }
     }
-    out.push((Tok::Eof, bytes.len()));
+    out.push((Tok::Eof, bytes.len(), bytes.len()));
     Ok(out)
 }
 
 struct Parser {
-    toks: Vec<(Tok, usize)>,
+    toks: Vec<(Tok, usize, usize)>,
     pos: usize,
+    /// End offset of the most recently consumed (via `bump`) token. After
+    /// `parse_value` returns, this is the exact end of the value just
+    /// parsed - the closing paren/bracket/brace for a compound value, or
+    /// the scalar token itself for a simple one.
+    last_end: usize,
 }
 
 impl Parser {
@@ -386,7 +397,8 @@ impl Parser {
     }
 
     fn bump(&mut self) -> Tok {
-        let t = self.toks[self.pos].0.clone();
+        let (t, _start, end) = self.toks[self.pos].clone();
+        self.last_end = end;
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
@@ -504,7 +516,11 @@ impl Parser {
 /// to be consumed.
 pub fn parse_complete(text: &str) -> Result<Value, ValueError> {
     let toks = tokenize(text)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        last_end: 0,
+    };
     let v = p.parse_value()?;
     if p.peek() != &Tok::Eof {
         return Err(ValueError {
@@ -525,8 +541,29 @@ pub struct ParsedHeader {
 /// exclusive of both brackets): a bare identifier (the section kind)
 /// followed by zero or more `key=value` attributes.
 pub fn parse_header_inner(inner: &str) -> Result<ParsedHeader, ValueError> {
+    let spanned = parse_header_inner_spanned(inner)?;
+    Ok(ParsedHeader {
+        kind: spanned.kind,
+        attrs: spanned.attrs.into_iter().map(|(k, v, _)| (k, v)).collect(),
+    })
+}
+
+/// Like [`ParsedHeader`], but each attribute also carries the byte span
+/// (relative to the start of `inner`) of its *value* text - the part
+/// after `=`. This is what [`crate::edit`] uses to replace a single
+/// attribute's value without touching any other byte of the header.
+pub(crate) struct ParsedHeaderSpanned {
+    pub kind: String,
+    pub attrs: Vec<(String, Value, Span)>,
+}
+
+pub(crate) fn parse_header_inner_spanned(inner: &str) -> Result<ParsedHeaderSpanned, ValueError> {
     let toks = tokenize(inner)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        last_end: 0,
+    };
     let kind = match p.bump() {
         Tok::Ident(s) => s,
         other => {
@@ -543,8 +580,10 @@ pub fn parse_header_inner(inner: &str) -> Result<ParsedHeader, ValueError> {
             Tok::Ident(key) => {
                 p.bump();
                 p.expect(&Tok::Eq)?;
+                let value_start = p.peek_offset();
                 let val = p.parse_value()?;
-                attrs.push((key, val));
+                let value_end = p.last_end;
+                attrs.push((key, val, value_start..value_end));
             }
             other => {
                 return Err(ValueError {
@@ -554,7 +593,7 @@ pub fn parse_header_inner(inner: &str) -> Result<ParsedHeader, ValueError> {
             }
         }
     }
-    Ok(ParsedHeader { kind, attrs })
+    Ok(ParsedHeaderSpanned { kind, attrs })
 }
 
 #[cfg(test)]
@@ -624,6 +663,20 @@ mod tests {
     #[test]
     fn rejects_trailing_garbage() {
         assert!(parse_complete("1 2").is_err());
+    }
+
+    #[test]
+    fn header_attr_spans_cover_exactly_the_value_text() {
+        let inner = r#"gd_scene load_steps=3 format=3 uid="uid://abc""#;
+        let spanned = parse_header_inner_spanned(inner).unwrap();
+        assert_eq!(spanned.kind, "gd_scene");
+        let (key, val, span) = &spanned.attrs[0];
+        assert_eq!(key, "load_steps");
+        assert_eq!(val, &Value::Int(3));
+        assert_eq!(&inner[span.clone()], "3");
+        let (key, _val, span) = &spanned.attrs[2];
+        assert_eq!(key, "uid");
+        assert_eq!(&inner[span.clone()], r#""uid://abc""#);
     }
 
     #[test]

@@ -20,6 +20,7 @@
 //! tools such as `sg fix` and `sg merge`.
 
 mod document;
+mod edit;
 mod error;
 mod raw;
 mod refs;
@@ -32,8 +33,9 @@ pub use document::{
     ConnectionInfo, Document, EditableInfo, ExtResourceInfo, FileDescriptor, FileKind, NodeInfo, PropertyInfo,
     SectionInfo, Stats, SubResourceInfo,
 };
+pub use edit::Edit;
 pub use error::{Diagnostic, ParseError, TreeError, ValueError};
-pub use refs::{Reference, ReferenceKind};
+pub use refs::{collect_references, Reference, ReferenceKind};
 pub use span::Span;
 pub use tree::{NodeTree, TreeNode};
 pub use value::{parse_complete, Value};

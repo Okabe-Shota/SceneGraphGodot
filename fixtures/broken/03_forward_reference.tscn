@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="ShaderMaterial" id="mat_1"]
+shader_param/detail = SubResource("shader_1")
+
+[sub_resource type="Shader" id="shader_1"]
+code = "shader code"
+
+[node name="Main" type="Node2D"]
+material = SubResource("mat_1")

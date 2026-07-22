@@ -1,0 +1,19 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Texture2D" path="res://unused.png" id="1_unused"]
+
+[ext_resource type="Texture2D" path="res://used.png" id="2_used"]
+
+[sub_resource type="Shape2D" id="shape_a"]
+extra = SubResource("shape_b")
+
+[sub_resource type="Shape2D" id="shape_b"]
+radius = 4.0
+
+[sub_resource type="Shape2D" id="shape_c"]
+radius = 8.0
+
+[node name="Main" type="Node2D"]
+texture = ExtResource("2_used")
+shape = SubResource("shape_c")
+
