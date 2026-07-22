@@ -1,0 +1,24 @@
+[gd_scene load_steps=2 format=3 uid="uid://packed001abc"]
+
+[sub_resource type="ArrayMesh" id="ArrayMesh_1"]
+_surfaces = [{
+"aabb": AABB(-1, -1, -1, 2, 2, 2),
+"format": 34359742465,
+"index_count": 6,
+"index_data": PackedByteArray("AAABAAIAAgADAAA="),
+"name": "",
+"vertex_data": PackedByteArray("AACAvwAAgL8AAAAAAACAPwAAgL8AAAAA")
+}]
+
+[node name="MeshInstance" type="MeshInstance2D"]
+mesh = SubResource("ArrayMesh_1")
+
+[node name="Polygon" type="Polygon2D" parent="."]
+polygon = PackedVector2Array(0, 0, 32, 0, 32, 32, 0, 32)
+color = Color(1, 0.5, 0, 1)
+vertex_colors = PackedColorArray(1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1)
+
+[node name="Labels" type="Node2D" parent="."]
+tags = PackedStringArray("a", "b", "c")
+scores = PackedInt32Array(10, 20, 30)
+weights = PackedFloat64Array(0.1, 0.25, 0.75)

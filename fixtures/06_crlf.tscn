@@ -1,0 +1,17 @@
+[gd_scene load_steps=3 format=3 uid="uid://crlf001abcxy"]
+
+[ext_resource type="Texture2D" path="res://icon.svg" id="1_tex"]
+
+[sub_resource type="RectangleShape2D" id="Rect_1"]
+size = Vector2(16, 16)
+
+[node name="Main" type="Node2D"]
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture = ExtResource("1_tex")
+position = Vector2(50, 60)
+
+[node name="Area" type="Area2D" parent="." groups=["hazards"]]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Area"]
+shape = SubResource("Rect_1")

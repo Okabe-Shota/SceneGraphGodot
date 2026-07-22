@@ -1,0 +1,15 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Main" type="Node2D" groups=["enemies", "damageable"]]
+
+[node name="Spawner" type="Node2D" parent="." groups=["spawners", "gameplay"]]
+spawn_table = {
+"easy": ["Slime", "Rat"],
+"hard": ["Dragon", "Golem"],
+"weights": [0.5, 0.3, 0.15, 0.05]
+}
+metadata/_edit_lock = true
+metadata/_edit_group_ = true
+
+[node name="Loot" type="Node2D" parent="."]
+drop_rules = {"common": SubResource("does_not_exist"), "rare": null}

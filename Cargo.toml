@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/scenegraph-core", "crates/sg"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/example/scenegraph"
+
+[profile.release]
+opt-level = 3

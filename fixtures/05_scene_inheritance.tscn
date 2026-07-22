@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3 uid="uid://inherit001abc"]
+
+[ext_resource type="PackedScene" path="res://enemy_base.tscn" id="1_base"]
+
+[node name="Enemy" instance=ExtResource("1_base")]
+
+[node name="Hitbox" parent="." index="0"]
+monitoring = true
+collision_layer = 4
+
+[node name="Label" type="Label" parent="." index="1"]
+text = "Slime"
+
+[editable path="Enemy/Hitbox"]

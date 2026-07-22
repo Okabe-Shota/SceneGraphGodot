@@ -1,0 +1,15 @@
+[package]
+name = "sg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool for inspecting and validating Godot text resource files"
+
+[[bin]]
+name = "sg"
+path = "src/main.rs"
+
+[dependencies]
+scenegraph-core = { path = "../scenegraph-core" }
+clap = { version = "4", features = ["derive"] }

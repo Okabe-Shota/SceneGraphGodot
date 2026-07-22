@@ -1,0 +1,11 @@
+[package]
+name = "scenegraph-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lossless parser and structural model for Godot text resource files (.tscn / .tres)"
+
+[dependencies]
+
+[dev-dependencies]
