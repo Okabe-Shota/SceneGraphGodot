@@ -1,2 +1,5 @@
 /target/
 *.pdb
+
+# Editor cruft
+.VSCodeCounter/
