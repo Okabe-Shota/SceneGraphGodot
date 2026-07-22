@@ -169,6 +169,30 @@ fn detects_broken_connection_node_path_as_unfixable_error() {
 }
 
 #[test]
+fn detects_duplicate_node_name_as_unfixable_error() {
+    let (code, json) = run_check_json(&broken_fixture("10_duplicate_node_name.tscn"));
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"duplicate-node-name\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+    assert!(json.contains("\"fixable\":false"), "{json}");
+    assert!(json.contains("\\\"Button\\\""), "{json}");
+}
+
+#[test]
+fn fix_does_not_touch_or_panic_on_duplicate_node_name() {
+    let path = broken_fixture("10_duplicate_node_name.tscn");
+    let original = read(&path);
+    let temp = copy_to_temp("10_duplicate_node_name.tscn");
+    let (code, _out, _err) = run_fix(&temp, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(read(&temp), original, "unfixable file must not be modified at all");
+
+    let (check_code, json) = run_check_json(&temp);
+    assert_eq!(check_code, 1);
+    assert!(json.contains("duplicate-node-name"), "{json}");
+}
+
+#[test]
 fn connection_into_instanced_child_scene_stays_clean() {
     // "Enemies" is an instanced sub-scene; "Enemies/Slime" is declared only
     // inside that sub-scene, which this file cannot see - must not be

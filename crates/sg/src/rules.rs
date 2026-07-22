@@ -98,6 +98,34 @@ fn declared_ids(sections: &[SectionInfo], kind: &str) -> HashMap<String, Vec<usi
     map
 }
 
+/// Maps `(parent, name)` -> every `node` section index declaring that
+/// combination (in file order). `parent` is `None` for sections with no
+/// `parent` attribute at all (root nodes - the same sibling group the
+/// multiple-root-nodes rule groups them into), or `Some(parent_attr)`
+/// otherwise, using the attribute's literal string value with no path
+/// resolution - this mirrors Godot's own sibling-uniqueness scope
+/// exactly (siblings are just "nodes sharing a parent", not a resolved
+/// tree position), and it means an orphan's broken `parent=` string still
+/// participates in its own (unresolvable) sibling group here, which is
+/// fine: this rule only cares about literal collisions, not resolution.
+/// Sections with no `name` attribute at all are skipped - that is a
+/// parse-level concern owned by other tooling, not this rule. More than
+/// one entry for a `(parent, name)` pair is a duplicate-node-name error.
+fn declared_node_names(sections: &[SectionInfo]) -> HashMap<(Option<String>, String), Vec<usize>> {
+    let mut map: HashMap<(Option<String>, String), Vec<usize>> = HashMap::new();
+    for (i, s) in sections.iter().enumerate() {
+        if s.kind != "node" {
+            continue;
+        }
+        let Some(name) = attr_str(s, "name") else {
+            continue;
+        };
+        let parent = attr_str(s, "parent").map(|p| p.to_string());
+        map.entry((parent, name.to_string())).or_default().push(i);
+    }
+    map
+}
+
 fn section_indices_of<'a>(sections: &'a [SectionInfo], kind: &'a str) -> Vec<usize> {
     sections
         .iter()
@@ -474,6 +502,39 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
                     });
                 }
             }
+        }
+    }
+
+    // Rule 9: duplicate node names among siblings. Godot's editor
+    // auto-renames a node on creation to keep siblings unique, so two
+    // `[node]` sections declaring the same literal `(parent, name)` pair
+    // can only come from a hand-edit or merge artifact: at load time the
+    // second either clobbers the first or gets silently renamed, and any
+    // NodePath/connection naming that path becomes ambiguous. Reported
+    // unconditionally - regardless of `index=`, `instance=`, or
+    // `instance_placeholder=` on either section - since two sections
+    // addressing the same node path is malformed in every interpretation
+    // (duplicate override sections, or a name collision with an
+    // instanced child override). Names are compared case-sensitively:
+    // Godot siblings named "Button" and "button" are distinct. Anchored
+    // on the second and subsequent occurrence, same convention as
+    // duplicate-ext-resource-id/duplicate-sub-resource-id above.
+    for ((parent, name), idxs) in &declared_node_names(&sections) {
+        for &dup in &idxs[1..] {
+            let parent_desc = match parent {
+                Some(p) => format!("parent=\"{p}\""),
+                None => "no parent (root)".to_string(),
+            };
+            issues.push(Issue {
+                code: "duplicate-node-name",
+                severity: Severity::Error,
+                line: line(dup),
+                message: format!(
+                    "duplicate node name \"{name}\" ({parent_desc}) - first declared at line {}",
+                    line(idxs[0])
+                ),
+                fixable: false,
+            });
         }
     }
 
@@ -960,6 +1021,146 @@ mod tests {
         );
         let doc = Document::parse(src).unwrap();
         assert!(issue_codes(&doc).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // duplicate-node-name: end-to-end via check()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reports_duplicate_node_name_under_same_parent() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Button\" type=\"Button\" parent=\".\"]\n",
+            "\n",
+            "[node name=\"Button\" type=\"Label\" parent=\".\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let issues = check(&doc, Path::new("test.tscn"));
+        let dups: Vec<_> = issues.iter().filter(|i| i.code == "duplicate-node-name").collect();
+        assert_eq!(dups.len(), 1, "{issues:?}");
+        let issue = dups[0];
+        assert_eq!(issue.severity, Severity::Error);
+        assert!(!issue.fixable);
+        assert_eq!(issue.line, 7, "must anchor on the second occurrence");
+        assert!(issue.message.contains("\"Button\""), "{}", issue.message);
+        assert!(
+            issue.message.contains("line 5"),
+            "must mention the first occurrence's line: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_node_name_among_parentless_roots() {
+        // Two nodes with no parent= attribute at all form one sibling
+        // group - this also independently trips multiple-root-nodes, but
+        // the two sharing the same literal name must additionally be
+        // reported here.
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Control\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let codes = issue_codes(&doc);
+        assert!(codes.contains(&"multiple-root-nodes"), "{codes:?}");
+        assert!(codes.contains(&"duplicate-node-name"), "{codes:?}");
+    }
+
+    #[test]
+    fn different_names_among_parentless_roots_is_not_a_duplicate() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Other\" type=\"Control\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let codes = issue_codes(&doc);
+        assert!(codes.contains(&"multiple-root-nodes"), "{codes:?}");
+        assert!(!codes.contains(&"duplicate-node-name"), "{codes:?}");
+    }
+
+    #[test]
+    fn same_name_under_different_parents_is_clean() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Panel\" type=\"Control\" parent=\".\"]\n",
+            "\n",
+            "[node name=\"Icon\" type=\"Sprite2D\" parent=\".\"]\n",
+            "\n",
+            "[node name=\"Icon\" type=\"Sprite2D\" parent=\"Panel\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            !issue_codes(&doc).contains(&"duplicate-node-name"),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
+    }
+
+    #[test]
+    fn case_differing_names_are_not_duplicates() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Button\" type=\"Button\" parent=\".\"]\n",
+            "\n",
+            "[node name=\"button\" type=\"Button\" parent=\".\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(!issue_codes(&doc).contains(&"duplicate-node-name"));
+    }
+
+    #[test]
+    fn sections_missing_name_are_skipped_for_duplicate_node_name() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node type=\"Node2D\" parent=\".\"]\n",
+            "\n",
+            "[node type=\"Node2D\" parent=\".\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            !issue_codes(&doc).contains(&"duplicate-node-name"),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
+    }
+
+    #[test]
+    fn duplicate_node_name_reported_even_with_instance_attribute() {
+        let src = concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"PackedScene\" path=\"res://enemy.tscn\" id=\"1_enemy\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Enemy\" parent=\".\" instance=ExtResource(\"1_enemy\")]\n",
+            "\n",
+            "[node name=\"Enemy\" parent=\".\" index=1]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let issues = check(&doc, Path::new("test.tscn"));
+        let dups: Vec<_> = issues.iter().filter(|i| i.code == "duplicate-node-name").collect();
+        assert_eq!(dups.len(), 1, "{issues:?}");
+        assert!(!dups[0].fixable);
     }
 
     #[test]
