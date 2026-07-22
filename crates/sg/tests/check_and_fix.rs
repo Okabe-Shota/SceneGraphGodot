@@ -257,6 +257,46 @@ fn detects_ext_resource_path_case_mismatch() {
 }
 
 #[test]
+fn detects_ext_resource_path_pointing_at_a_directory() {
+    // `res://scripts` resolves to a real directory entry in
+    // `fixtures/engine_project/` - `Path::exists()`-style logic would call
+    // that "found", but Godot's `ResourceLoader` can never load a
+    // directory as a resource.
+    let path = fixtures_dir().join("engine_project").join("directory_path.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"ext-resource-path-is-directory\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+    assert!(json.contains("\"fixable\":false"), "{json}");
+    assert!(json.contains("res://scripts"), "{json}");
+}
+
+#[test]
+fn fix_dry_run_does_not_touch_or_panic_on_case_mismatch_or_directory_path_fixtures() {
+    // `sg fix --dry-run` must never write, and must never panic, on the
+    // real project fixtures backing the ext_resource-path-on-disk rules -
+    // exercised directly here rather than only through the generic
+    // "every well-formed fixture" loop, since these live in project
+    // subdirectories that loop does not descend into.
+    for (dir, name) in [
+        ("case_mismatch_project", "scene.tscn"),
+        ("engine_project", "broken.tscn"),
+        ("engine_project", "directory_path.tscn"),
+        ("engine_project", "valid.tscn"),
+    ] {
+        let path = fixtures_dir().join(dir).join(name);
+        let original = read(&path);
+        let (code, _stdout, _err) = run_fix(&path, &["--dry-run"]);
+        assert!(code == 0 || code == 1, "{dir}/{name}: unexpected exit code {code}");
+        assert_eq!(
+            read(&path),
+            original,
+            "{dir}/{name}: --dry-run must never modify the file"
+        );
+    }
+}
+
+#[test]
 fn files_without_a_project_root_are_silently_skipped_for_path_checks() {
     // fixtures/broken/08_composite.tscn declares ext_resource sections
     // whose res:// paths don't exist anywhere on disk, but the fixture

@@ -555,7 +555,7 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
                 let Some(path) = attr_str(s, attr_key) else {
                     continue; // missing/non-string attribute: not this rule's job
                 };
-                if path.is_empty() || is_opaque_node_path(path) {
+                if is_opaque_node_path(path) {
                     continue;
                 }
                 if graph.path_to_index.contains_key(path) {
@@ -647,6 +647,11 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
     // doc comment on `find_project_root`, shared with `crate::engine` via
     // `crate::paths`). Only `path` attributes are inspected - `uid`
     // attributes and non-`res://` paths (e.g. `uid://...`) are untouched.
+    // Also catches a path that resolves to a real, existing *directory*
+    // (e.g. `res://scripts` where `scripts/` is a folder) - Godot's
+    // `ResourceLoader` cannot load a directory as a resource, so this is
+    // just as broken as a path that doesn't exist on disk at all, even
+    // though `res_relative`'s components all matched real entries.
     if let Some(project_root) = find_project_root(file) {
         let mut dir_cache = DirCache::new();
         for &i in &ext_indices {
@@ -667,6 +672,18 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
                         message: format!(
                             "ext_resource \"{id}\" path \"{path_attr}\" exists on disk but with \
                              different case (actual: \"res://{actual_relative}\")"
+                        ),
+                        fixable: false,
+                    });
+                }
+                PathCheck::IsDirectory { actual_relative } => {
+                    issues.push(Issue {
+                        code: "ext-resource-path-is-directory",
+                        severity: Severity::Error,
+                        line: line(i),
+                        message: format!(
+                            "ext_resource \"{id}\" path \"{path_attr}\" resolves to a directory \
+                             (\"res://{actual_relative}\"), not a file, and cannot be loaded as a resource"
                         ),
                         fixable: false,
                     });
@@ -1023,6 +1040,91 @@ mod tests {
         assert!(issue_codes(&doc).is_empty());
     }
 
+    #[test]
+    fn empty_connection_path_is_reported_as_broken() {
+        // An empty NodePath (`from=""`) is not one of the opaque syntaxes
+        // (`%`, `@`, `..`, `:`) this rule deliberately declines to reason
+        // about - it never resolves to any node in Godot (`NodePath("")`
+        // is the canonical *empty* path, distinct from `"."`), so it must
+        // be reported just like any other unresolvable literal string.
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\"\" to=\".\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let codes = issue_codes(&doc);
+        assert_eq!(codes, vec!["broken-connection-node-path"]);
+    }
+
+    #[test]
+    fn dot_inside_a_quoted_node_name_does_not_confuse_path_resolution() {
+        // "." only means "the root" when it is a whole path *component*
+        // (split on '/'); a literal '.' character inside a node's own name
+        // must not be mistaken for that syntax.
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"My.Node\" type=\"Button\" parent=\".\"]\n",
+            "\n",
+            "[connection signal=\"pressed\" from=\"My.Node\" to=\".\" method=\"_on_pressed\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            issue_codes(&doc).is_empty(),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
+    }
+
+    #[test]
+    fn connection_two_levels_inside_an_instanced_child_scene_is_skipped() {
+        // "Enemies" is instanced; "Enemies/Squad/Slime" is two levels
+        // *inside* that instanced sub-scene - `strict_prefixes` must check
+        // every ancestor, not just the immediate parent, to find the
+        // instanced boundary.
+        let src = concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"PackedScene\" path=\"res://enemy.tscn\" id=\"1_enemy\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Enemies\" parent=\".\" instance=ExtResource(\"1_enemy\")]\n",
+            "\n",
+            "[connection signal=\"died\" from=\"Enemies/Squad/Slime\" to=\".\" method=\"_on_died\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            issue_codes(&doc).is_empty(),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
+    }
+
+    #[test]
+    fn self_referential_root_dot_parent_is_an_orphan_not_a_hang() {
+        // A node literally named "." whose own `parent="."` attribute
+        // would - if resolved naively - point right back at itself: this
+        // exercises the `p != i` self-reference guard in
+        // `build_node_graph`. Must terminate (no stack overflow / infinite
+        // loop) and report the node as an unresolvable orphan, since there
+        // is no actual parentless root anywhere in the file for "." to
+        // legitimately mean.
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\".\" type=\"Node2D\" parent=\".\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let codes = issue_codes(&doc);
+        assert_eq!(codes, vec!["orphan-node"], "{:?}", check(&doc, Path::new("test.tscn")));
+    }
+
     // -----------------------------------------------------------------
     // duplicate-node-name: end-to-end via check()
     // -----------------------------------------------------------------
@@ -1086,6 +1188,30 @@ mod tests {
         let codes = issue_codes(&doc);
         assert!(codes.contains(&"multiple-root-nodes"), "{codes:?}");
         assert!(!codes.contains(&"duplicate-node-name"), "{codes:?}");
+    }
+
+    #[test]
+    fn root_node_and_its_own_child_sharing_a_name_is_not_a_duplicate() {
+        // The parentless root ("no parent attribute at all") and a node
+        // declared with parent="." are two *different* sibling groups
+        // (`None` vs `Some(".")`) - the root itself and a direct child of
+        // the root occupy different tree depths, so them sharing a literal
+        // name (e.g. a "Player" root with a "Player"-named child, a
+        // pattern Godot allows) must never be flagged here. This pins the
+        // exact distinction `declared_node_names`'s doc comment describes.
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Player\" type=\"Node2D\"]\n",
+            "\n",
+            "[node name=\"Player\" type=\"Sprite2D\" parent=\".\"]\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        assert!(
+            !issue_codes(&doc).contains(&"duplicate-node-name"),
+            "{:?}",
+            check(&doc, Path::new("test.tscn"))
+        );
     }
 
     #[test]

@@ -33,6 +33,15 @@ pub enum PathCheck {
     /// `actual_relative` is the on-disk path (correct case throughout,
     /// `/`-separated) with the same number of components.
     CaseMismatch { actual_relative: String },
+    /// Every path component resolved to a real, existing directory entry
+    /// (exactly, or via the case-insensitive fallback - `actual_relative`
+    /// reflects whichever casing is actually on disk), but the final
+    /// component names a directory, not a file. Godot's `ResourceLoader`
+    /// can never load a directory as a resource, so a path like
+    /// `res://scripts` (where `scripts/` is a directory) is just as
+    /// unusable as one that doesn't exist at all, even though it passes a
+    /// bare [`std::path::Path::exists`] check.
+    IsDirectory { actual_relative: String },
     /// Some path component has no directory entry at all, even
     /// case-insensitively - the path does not exist on disk under any
     /// casing.
@@ -68,6 +77,30 @@ impl DirCache {
     }
 }
 
+/// Lexically normalize a `/`-split component list the way Godot's own
+/// `String::simplify_path()` does: `.` components are dropped (they name
+/// "this directory") and a `..` component cancels the previous real
+/// component instead of being looked up as a literal directory entry
+/// named `".."` (which - unlike `.`/`..` themselves inside a real
+/// directory listing - never appears in [`std::fs::read_dir`]'s output,
+/// so without this pass `res://a/../b.gd` would be (mis)reported as
+/// missing even when `res://b.gd` exists). A leading `..` with nothing
+/// left to cancel would have to reach above `project_root`, which is
+/// never a valid `res://` path, so `None` is returned for that case.
+fn normalize_components<'a>(raw: impl Iterator<Item = &'a str>) -> Option<Vec<&'a str>> {
+    let mut out: Vec<&str> = Vec::new();
+    for component in raw {
+        match component {
+            "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
 /// Resolve `res_relative` (a `res://` path with the `res://` prefix
 /// already stripped, e.g. `"scripts/player.gd"`) against `project_root`,
 /// walking one path component at a time through `cache`'s directory
@@ -80,8 +113,16 @@ impl DirCache {
 /// [`PathCheck::Missing`]). A component that matches exactly never
 /// triggers the case-insensitive fallback at all, so a fully-correct path
 /// costs exactly one exact-match scan per component.
+///
+/// Before any of that, `res_relative` is split on `/` and lexically
+/// normalized ([`normalize_components`]): empty components (from a
+/// trailing slash or a doubled `//`), `.` components, and `..`
+/// components are resolved the same way Godot itself resolves them,
+/// rather than being looked up as literal directory entries.
 pub fn check_res_path(project_root: &Path, res_relative: &str, cache: &mut DirCache) -> PathCheck {
-    let components: Vec<&str> = res_relative.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(components) = normalize_components(res_relative.split('/').filter(|s| !s.is_empty())) else {
+        return PathCheck::Missing;
+    };
     if components.is_empty() {
         return PathCheck::Missing;
     }
@@ -116,6 +157,16 @@ pub fn check_res_path(project_root: &Path, res_relative: &str, cache: &mut DirCa
             }
             None => return PathCheck::Missing,
         }
+    }
+
+    // Every component matched a real entry, but Godot can only ever load a
+    // *file* through `ext_resource` - a path that resolves to a directory
+    // is just as unusable as one that resolves to nothing, so it takes
+    // priority over reporting a (moot) exact-case match.
+    if current_dir.is_dir() {
+        return PathCheck::IsDirectory {
+            actual_relative: actual_components.join("/"),
+        };
     }
 
     if case_mismatch {
@@ -239,6 +290,172 @@ mod tests {
             check_res_path(&root, "scripts/player.gd", &mut cache),
             PathCheck::Exact,
             "second lookup should hit the cached (now stale) listing, not re-read the directory"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // Adversarial path-component edge cases.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn path_pointing_at_a_directory_is_reported_as_is_directory() {
+        // `res://scripts` (no trailing slash) resolves to a real directory
+        // entry - `Path::exists()`-style logic would call that "found",
+        // but Godot's `ResourceLoader` can never load a directory as a
+        // resource, so this must not be reported as `Exact`.
+        let root = fresh_temp_dir("dir-as-file");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("player.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts", &mut cache),
+            PathCheck::IsDirectory {
+                actual_relative: "scripts".to_string()
+            }
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn trailing_slash_on_a_directory_is_also_reported_as_is_directory() {
+        // A trailing slash normalizes away to the same component list as
+        // the no-slash case above; both must be caught identically.
+        let root = fresh_temp_dir("dir-trailing-slash");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts/", &mut cache),
+            PathCheck::IsDirectory {
+                actual_relative: "scripts".to_string()
+            }
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn directory_pointed_at_via_case_insensitive_match_is_still_is_directory() {
+        // Case-mismatch resolution and the directory check must compose:
+        // the directory verdict wins, but still carries the corrected
+        // on-disk casing so the reported message stays accurate.
+        let root = fresh_temp_dir("dir-case-mismatch");
+        fs::create_dir_all(root.join("Scripts")).unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts", &mut cache),
+            PathCheck::IsDirectory {
+                actual_relative: "Scripts".to_string()
+            }
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn embedded_double_slash_is_normalized_like_a_single_slash() {
+        // Godot's own path simplification collapses doubled slashes; a
+        // literal directory entry named "" can never exist, so without
+        // filtering empty components this would wrongly report Missing.
+        let root = fresh_temp_dir("double-slash");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("player.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts//player.gd", &mut cache),
+            PathCheck::Exact
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn leading_dot_component_is_a_no_op_like_godots_simplify_path() {
+        // `res://./scripts/player.gd` names the exact same file as
+        // `res://scripts/player.gd` - a literal directory entry named "."
+        // is never listed by `read_dir`, so without normalization this
+        // would wrongly report Missing.
+        let root = fresh_temp_dir("dot-component");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("player.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "./scripts/player.gd", &mut cache),
+            PathCheck::Exact
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dotdot_component_cancels_the_preceding_component() {
+        // `res://scripts/../scripts/player.gd` names the exact same file
+        // as `res://scripts/player.gd` once simplified - `..` is never a
+        // literal directory entry either.
+        let root = fresh_temp_dir("dotdot-component");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("player.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts/../scripts/player.gd", &mut cache),
+            PathCheck::Exact
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dotdot_escaping_above_the_project_root_is_missing() {
+        // A `..` with nothing left to cancel would have to reach above
+        // `project_root`, which can never be a valid `res://` path.
+        let root = fresh_temp_dir("dotdot-escape");
+        let mut cache = DirCache::new();
+        assert_eq!(check_res_path(&root, "../outside.gd", &mut cache), PathCheck::Missing);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backslash_is_not_a_path_separator_and_never_resolves() {
+        // Godot's res:// paths use '/' exclusively; a literal backslash is
+        // just an ordinary (and here, non-matching) character within a
+        // single component, never a separator to split on.
+        let root = fresh_temp_dir("backslash");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("player.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, r"scripts\player.gd", &mut cache),
+            PathCheck::Missing
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn filenames_with_spaces_and_percent_signs_resolve_normally() {
+        let root = fresh_temp_dir("space-percent");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("my file 100%.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts/my file 100%.gd", &mut cache),
+            PathCheck::Exact
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unicode_filenames_resolve_normally() {
+        let root = fresh_temp_dir("unicode");
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("scripts").join("プレイヤー.gd"), "").unwrap();
+
+        let mut cache = DirCache::new();
+        assert_eq!(
+            check_res_path(&root, "scripts/プレイヤー.gd", &mut cache),
+            PathCheck::Exact
         );
         fs::remove_dir_all(&root).ok();
     }

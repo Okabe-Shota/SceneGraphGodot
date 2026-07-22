@@ -173,40 +173,43 @@ Rules, each tagged fixable or not:
 | `duplicate-ext-resource-id` / `duplicate-sub-resource-id` | error | no | The same id is declared by more than one `ext_resource`/`sub_resource` section (checked in separate namespaces, since `ExtResource("x")` and `SubResource("x")` never collide). |
 | `missing-ext-resource-path` | error | no | An `ext_resource`'s `path="res://..."` does not resolve to any file on disk under the file's Godot project root (checked component-by-component against real directory listings; `uid=` attributes and non-`res://` paths are not checked). Skipped entirely for a file with no `project.godot` ancestor - see "Project-relative (`res://`) paths" below. |
 | `ext-resource-path-case-mismatch` | warning | no | An `ext_resource`'s `path="res://..."` exists on disk, but some path component differs from it only in character case. Harmless on case-insensitive filesystems (Windows, macOS) but breaks on Linux and in exported builds, which are case-sensitive. |
+| `ext-resource-path-is-directory` | error | no | An `ext_resource`'s `path="res://..."` resolves to a real, existing directory rather than a file - every path component matches something on disk, but Godot's `ResourceLoader` can never load a directory as a resource, so this is just as broken as a path that doesn't exist at all. |
 | `broken-connection-node-path` | error | no | A `[connection]`'s `from=`/`to=` NodePath does not resolve to any node declared in this file. Conservatively skipped whenever the path could plausibly resolve elsewhere: it lives under a node with `instance=`/`instance_placeholder=` (an instanced sub-scene this file can't see into), it contains `%`/`@`/`..`/`:` (unique-name, special, parent-traversal, or property-subpath syntax), or the file's own root node is itself an instance (an inherited scene). |
 
 ### Project-relative (`res://`) paths
 
-`missing-ext-resource-path` and `ext-resource-path-case-mismatch` need a Godot
-project root to resolve a `res://` path against: the nearest ancestor
-directory of the checked file that contains `project.godot` (the same
-resolution `sg check --engine` uses - see below). A file with no such
-ancestor has no meaningful `res://` root, so both rules are silently
-skipped for it; that case is `--engine`'s `engine-project-not-found`
-territory, not a new issue kind here. Directory listings are cached per
-`sg check` invocation per file, since one file's `ext_resource` sections
-commonly share leading path components (e.g. a common `scripts/`
-directory).
+`missing-ext-resource-path`, `ext-resource-path-case-mismatch`, and
+`ext-resource-path-is-directory` all need a Godot project root to resolve a
+`res://` path against: the nearest ancestor directory of the checked file
+that contains `project.godot` (the same resolution `sg check --engine` uses -
+see below). A file with no such ancestor has no meaningful `res://` root, so
+all three rules are silently skipped for it; that case is `--engine`'s
+`engine-project-not-found` territory, not a new issue kind here. Directory
+listings are cached per `sg check` invocation per file, since one file's
+`ext_resource` sections commonly share leading path components (e.g. a
+common `scripts/` directory).
 
 ## `sg check --engine`
 
 Most of the rules above validate ids declared *within* a file (does
 `ExtResource("x")` resolve to some `ext_resource` id also declared in this
-file?) and never touch disk. `missing-ext-resource-path` and
-`ext-resource-path-case-mismatch` are the exception: they do look at disk,
-resolving each `ext_resource`'s `path="res://..."` against the file's Godot
-project root and reporting it as missing or case-mismatched. What static
-checking still cannot do is tell you whether Godot itself can actually load
-the file - a syntactically fine, on-disk-and-correctly-cased `path` can still
-point at something Godot's own loader rejects for reasons `sg` has no model
-of (a corrupt resource, an incompatible format, a script with a syntax
-error). `--engine` closes *that* gap by handing each file to a real,
-headless Godot instance and trusting its judgment instead: a small generated
-GDScript loads the file through Godot's own `ResourceLoader`, checks every
-dependency Godot itself reports for it (`ResourceLoader.get_dependencies` +
-`ResourceLoader.exists`), and separately checks that `ResourceLoader.load()`
-doesn't return `null`. That dependency-existence check is what originally
-motivated `--engine` and is still worth keeping even now that the static
+file?) and never touch disk. `missing-ext-resource-path`,
+`ext-resource-path-case-mismatch`, and `ext-resource-path-is-directory` are
+the exception: they do look at disk, resolving each `ext_resource`'s
+`path="res://..."` against the file's Godot project root and reporting it
+as missing, case-mismatched, or pointing at a directory instead of a file.
+What static checking still cannot do is tell you whether Godot itself can
+actually load the file - a syntactically fine, on-disk-and-correctly-cased
+`path` can still point at something Godot's own loader rejects for reasons
+`sg` has no model of (a corrupt resource, an incompatible format, a script
+with a syntax error). `--engine` closes *that* gap by handing each file to
+a real, headless Godot instance and trusting its judgment instead: a small
+generated GDScript loads the file through Godot's own `ResourceLoader`,
+checks every dependency Godot itself reports for it
+(`ResourceLoader.get_dependencies` + `ResourceLoader.exists`), and
+separately checks that `ResourceLoader.load()` doesn't return `null`. That
+dependency-existence check is what originally motivated `--engine` and is
+still worth keeping even now that the static
 rules cover the common case: it is Godot's own, independent confirmation of
 exactly what `missing-ext-resource-path` already found, and it exercises the
 same `ResourceLoader.get_dependencies` traversal Godot uses at load time,
