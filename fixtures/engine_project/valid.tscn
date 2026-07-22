@@ -1,0 +1,14 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/valid_script.gd" id="1_scr"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_1"]
+size = Vector2(32, 32)
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_scr")
+
+[node name="Body" type="CharacterBody2D" parent="."]
+
+[node name="Collision" type="CollisionShape2D" parent="Body"]
+shape = SubResource("RectangleShape2D_1")

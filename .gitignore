@@ -3,3 +3,6 @@
 
 # Editor cruft
 .VSCodeCounter/
+
+# Downloaded Godot binary used by `sg check --engine` (see README).
+/.godot-bin/

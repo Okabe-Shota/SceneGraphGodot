@@ -1,0 +1,10 @@
+; Engine Configuration File.
+; Minimal fixture project used by crates/sg's `sg check --engine` tests to
+; exercise real headless Godot loading. See README.md, "sg check --engine".
+
+config_version=5
+
+[application]
+
+config/name="sg_engine_fixture"
+config/features=PackedStringArray("4.3")

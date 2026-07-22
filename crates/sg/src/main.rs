@@ -2,6 +2,7 @@
 //! resource files (`.tscn` / `.tres`) using scenegraph-core.
 
 mod diff;
+mod engine;
 mod fix;
 mod json;
 mod paths;
@@ -10,6 +11,7 @@ mod rules;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use scenegraph_core::Document;
@@ -47,6 +49,20 @@ enum Command {
         /// Emit a machine-readable JSON array instead of text lines.
         #[arg(long)]
         json: bool,
+        /// After the static check passes without a parse error, also
+        /// verify each file actually loads in a headless Godot engine
+        /// instance - the engine's own judgment, not just sg's static
+        /// rules. See README.md, "sg check --engine".
+        #[arg(long)]
+        engine: bool,
+        /// Path to the Godot executable used by --engine. Overrides the
+        /// SG_GODOT environment variable and PATH search (see README.md).
+        #[arg(long)]
+        godot_path: Option<PathBuf>,
+        /// Per-project timeout, in seconds, for the headless Godot
+        /// process launched by --engine.
+        #[arg(long, default_value_t = 30)]
+        engine_timeout: u64,
     },
     /// Fix everything `sg check` reports as mechanically fixable, in
     /// place. Issues it cannot safely fix (broken/circular/duplicate
@@ -71,7 +87,13 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Parse { file } => cmd_parse(&file),
         Command::Roundtrip { file } => cmd_roundtrip(&file),
-        Command::Check { paths, json } => cmd_check(&paths, json),
+        Command::Check {
+            paths,
+            json,
+            engine,
+            godot_path,
+            engine_timeout,
+        } => cmd_check(&paths, json, engine, godot_path.as_deref(), engine_timeout),
         Command::Fix {
             paths,
             dry_run,
@@ -205,7 +227,7 @@ fn parse_error_issue(e: &scenegraph_core::ParseError) -> Issue {
     }
 }
 
-fn cmd_check(paths: &[PathBuf], json: bool) -> ExitCode {
+fn cmd_check(paths: &[PathBuf], json: bool, engine: bool, godot_path: Option<&Path>, engine_timeout: u64) -> ExitCode {
     let files = paths::collect_target_files(paths);
     let mut all: Vec<(PathBuf, Issue)> = Vec::new();
     let mut had_parse_error = false;
@@ -237,12 +259,39 @@ fn cmd_check(paths: &[PathBuf], json: bool) -> ExitCode {
         }
     }
 
+    // The engine gate never runs on top of a parse error: a file sg
+    // itself could not parse has nothing meaningful to hand to Godot, and
+    // running the (potentially slow) engine pass over the files that did
+    // parse would just delay reporting a failure that's already final.
+    let mut env_error: Option<String> = None;
+    if engine && !had_parse_error {
+        match engine::run_engine_checks(&files, godot_path, Duration::from_secs(engine_timeout)) {
+            Ok(engine_issues) => {
+                if !engine_issues.is_empty() {
+                    had_issue = true;
+                }
+                all.extend(engine_issues);
+            }
+            Err(msg) => env_error = Some(msg),
+        }
+    }
+
     if json {
         println!("{}", json::issues_array(&all));
     } else {
         for (file, issue) in &all {
             print_issue_line(file, issue);
         }
+    }
+
+    // An environment error (no Godot binary, or it could not be launched)
+    // is reported last, after whatever static results were already found,
+    // and takes priority over the exit code those results would otherwise
+    // produce: it means engine verification did not run at all, which is
+    // a different and more urgent problem than "some issues were found".
+    if let Some(msg) = env_error {
+        eprintln!("error: {msg}");
+        return ExitCode::from(3);
     }
 
     if had_parse_error {
