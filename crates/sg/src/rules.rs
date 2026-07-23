@@ -12,6 +12,7 @@ use std::path::Path;
 
 use scenegraph_core::{collect_references, parse_complete, Document, Reference, ReferenceKind, SectionInfo};
 
+use crate::config::RuleConfig;
 use crate::paths::find_project_root;
 use crate::respath::{check_res_path, DirCache, PathCheck};
 
@@ -712,32 +713,41 @@ pub fn check(doc: &Document, file: &Path) -> Vec<Issue> {
 
 /// Derive a concrete repair plan for everything mechanically fixable.
 /// `keep_unused` disables rule 5 (unused-resource deletion) entirely, as
-/// if that rule found nothing to delete.
-pub fn plan_fix(doc: &Document, keep_unused: bool) -> FixPlan {
+/// if that rule found nothing to delete. `config` (the `sg.toml`, if any,
+/// governing this file - see [`crate::config`]) disables a rule's
+/// contribution to the plan the same way `sg check` disables its
+/// reporting: a rule turned `off` must not be repaired either, so each
+/// section below is individually gated on the corresponding code not
+/// being off.
+pub fn plan_fix(doc: &Document, keep_unused: bool, config: Option<&RuleConfig>) -> FixPlan {
     let sections = doc.sections();
     let ext_indices = section_indices_of(&sections, "ext_resource");
     let sub_indices = section_indices_of(&sections, "sub_resource");
     let sub_occurrences = declared_ids(&sections, "sub_resource");
     let sub_first: HashMap<String, usize> = sub_occurrences.iter().map(|(id, idxs)| (id.clone(), idxs[0])).collect();
+    let is_off = |code: &str| config.is_some_and(|c| c.is_off(code));
 
     let mut plan = FixPlan::default();
 
     // Rule 5 first: deletions change which sub_resource sections still
     // need to participate in rule 3's reorder, and change the counts
     // rule 1's load_steps fix uses (computed by the caller, after this
-    // plan).
+    // plan). `unused-ext-resource` and `unused-sub-resource` are gated
+    // independently, since a config may disable only one of them.
     if !keep_unused {
         let (used_ext, used_sub) = compute_used(&sections, &sub_first);
+        let ext_off = is_off("unused-ext-resource");
+        let sub_off = is_off("unused-sub-resource");
         for &i in &ext_indices {
             if let Some(id) = attr_str(&sections[i], "id") {
-                if !used_ext.contains(id) {
+                if !used_ext.contains(id) && !ext_off {
                     plan.delete_sections.insert(i);
                 }
             }
         }
         for &i in &sub_indices {
             if let Some(id) = attr_str(&sections[i], "id") {
-                if !used_sub.contains(id) {
+                if !used_sub.contains(id) && !sub_off {
                     plan.delete_sections.insert(i);
                 }
             }
@@ -745,33 +755,37 @@ pub fn plan_fix(doc: &Document, keep_unused: bool) -> FixPlan {
     }
 
     // Rule 3: reorder the sub_resource sections that survive deletion.
-    let live_sub_indices: Vec<usize> = sub_indices
-        .iter()
-        .copied()
-        .filter(|i| !plan.delete_sections.contains(i))
-        .collect();
-    let deps = sub_resource_deps(&sections, &live_sub_indices, &sub_first);
-    let (order, _cyclic) = stable_topo_sort(&live_sub_indices, &deps);
-    if order != live_sub_indices && !live_sub_indices.is_empty() {
-        plan.sub_resource_reorder = Some((live_sub_indices, order));
+    if !is_off("sub-resource-forward-reference") {
+        let live_sub_indices: Vec<usize> = sub_indices
+            .iter()
+            .copied()
+            .filter(|i| !plan.delete_sections.contains(i))
+            .collect();
+        let deps = sub_resource_deps(&sections, &live_sub_indices, &sub_first);
+        let (order, _cyclic) = stable_topo_sort(&live_sub_indices, &deps);
+        if order != live_sub_indices && !live_sub_indices.is_empty() {
+            plan.sub_resource_reorder = Some((live_sub_indices, order));
+        }
     }
 
     // Rule 4: reorder node sections so every parent precedes its children.
     // Only attempted when the node set forms one fully-resolvable tree;
     // orphans/multiple roots are unfixable and left untouched.
-    let graph = build_node_graph(&sections);
-    if graph.roots.len() == 1 && graph.orphans.is_empty() {
-        let depends_on: HashMap<usize, Vec<usize>> = graph
-            .node_indices
-            .iter()
-            .filter_map(|&i| graph.parent_of.get(&i).map(|&p| (i, vec![p])))
-            .collect();
-        let (order, cyclic) = stable_topo_sort(&graph.node_indices, &depends_on);
-        // A tree (one parent per node) can never actually cycle; this is
-        // just defense in depth against a future bug in graph
-        // construction, not a reachable case today.
-        if cyclic.is_empty() && order != graph.node_indices && !graph.node_indices.is_empty() {
-            plan.node_reorder = Some((graph.node_indices, order));
+    if !is_off("child-before-parent") {
+        let graph = build_node_graph(&sections);
+        if graph.roots.len() == 1 && graph.orphans.is_empty() {
+            let depends_on: HashMap<usize, Vec<usize>> = graph
+                .node_indices
+                .iter()
+                .filter_map(|&i| graph.parent_of.get(&i).map(|&p| (i, vec![p])))
+                .collect();
+            let (order, cyclic) = stable_topo_sort(&graph.node_indices, &depends_on);
+            // A tree (one parent per node) can never actually cycle; this
+            // is just defense in depth against a future bug in graph
+            // construction, not a reachable case today.
+            if cyclic.is_empty() && order != graph.node_indices && !graph.node_indices.is_empty() {
+                plan.node_reorder = Some((graph.node_indices, order));
+            }
         }
     }
 

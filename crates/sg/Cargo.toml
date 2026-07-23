@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 scenegraph-core = { path = "../scenegraph-core" }
 clap = { version = "4", features = ["derive"] }
+toml = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

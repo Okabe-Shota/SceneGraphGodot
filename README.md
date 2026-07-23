@@ -19,9 +19,12 @@ information no one asked it to touch.
   small mutation layer (`src/edit.rs`) for surgical, span-exact edits. No
   required dependencies beyond the standard library.
 - `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`)
-  built on top of scenegraph-core. Depends on `clap` for argument parsing;
-  everything else (diffing, JSON output) is hand-rolled to keep the
-  dependency footprint small.
+  built on top of scenegraph-core. Depends on `clap` for argument parsing
+  and `toml` for `sg.toml` configuration (see "Configuration (`sg.toml`)"
+  below - the one deliberate exception to keeping the dependency footprint
+  small, since hand-rolling TOML's quoting/escaping/comment rules is not
+  worth it for one config file format); everything else (diffing, JSON
+  output) is still hand-rolled.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
   suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
@@ -188,6 +191,62 @@ all three rules are silently skipped for it; that case is `--engine`'s
 listings are cached per `sg check` invocation per file, since one file's
 `ext_resource` sections commonly share leading path components (e.g. a
 common `scripts/` directory).
+
+## Configuration (`sg.toml`)
+
+Both `sg check` and `sg fix` accept a project-level `sg.toml`, letting you
+turn a rule off entirely or change the severity it reports at, without any
+new CLI flags. Drop it next to your scene files, or anywhere above them:
+
+```toml
+# sg.toml
+[rules]
+unused-ext-resource = "off"                    # disable a rule entirely
+ext-resource-path-case-mismatch = "error"      # promote warning -> error
+load-steps-mismatch = "warning"                # demote error -> warning
+```
+
+### Discovery
+
+For each file being checked or fixed, `sg` walks upward from the file's
+directory looking for `sg.toml`, using the exact same nearest-ancestor
+resolution as `project.godot` (see "Project-relative (`res://`) paths"
+above): the first ancestor directory that has one governs that file. A
+checkout with no `sg.toml` anywhere behaves exactly as if this feature did
+not exist - every rule at its built-in default severity. Directory-to-
+config resolution and each distinct `sg.toml`'s parsed contents are both
+cached per `sg`/`sg fix` invocation, so a run over many files sharing a
+directory (or an ancestor) only walks the filesystem and parses a given
+`sg.toml` once.
+
+### `[rules]` keys and values
+
+Each key under `[rules]` must be one of the exact issue codes from the
+rules table above (the same kebab-case string shown in `sg check`'s
+output and its `--json` `code` field). Each value is one of three plain
+strings:
+
+- `"off"` - the rule neither reports an issue nor gets repaired by
+  `sg fix`. This is the one setting that changes fixing behavior: a
+  disabled fixable rule (e.g. `unused-ext-resource`) is left untouched by
+  `sg fix`, exactly as if it were unfixable.
+- `"warning"` / `"error"` - overrides the rule's reported severity, in
+  both text and `--json` output. This changes *only* the severity label;
+  it never changes whether a rule is fixable, and it never changes exit
+  codes - `sg check`/`sg fix` still exit `1` whenever at least one issue
+  is reported, regardless of its (possibly overridden) severity.
+
+`sg.toml` is strict about mistakes on purpose: an unrecognized rule name,
+a value other than `"off"`/`"warning"`/`"error"`, or malformed TOML all
+produce a config error naming the `sg.toml` path and the offending
+key/value, and exit with the same exit code `sg check`/`sg fix` already
+use for a file that failed to parse (`2`) - a typo'd rule name silently
+doing nothing would be worse than a loud failure. Engine-pass issue codes
+(`engine-load-failed`, `engine-timeout`, `engine-project-not-found`,
+`engine-run-failed` - see "`sg check --engine`" below) are not
+configurable this round; naming one in `[rules]` is rejected the same
+way, with a message explaining that engine issues always run at their
+built-in severity.
 
 ## `sg check --engine`
 

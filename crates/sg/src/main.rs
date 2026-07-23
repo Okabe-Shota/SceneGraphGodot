@@ -1,6 +1,7 @@
 //! `sg`: command-line tool for inspecting and validating Godot text
 //! resource files (`.tscn` / `.tres`) using scenegraph-core.
 
+mod config;
 mod diff;
 mod engine;
 mod fix;
@@ -9,6 +10,7 @@ mod paths;
 mod respath;
 mod rules;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,6 +19,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use scenegraph_core::Document;
 
+use config::ConfigCache;
 use rules::{Issue, Severity};
 
 #[derive(Parser)]
@@ -228,11 +231,37 @@ fn parse_error_issue(e: &scenegraph_core::ParseError) -> Issue {
     }
 }
 
+/// Look up the `sg.toml` (if any) governing `file` through `cache`,
+/// printing and deduplicating a config error exactly once per distinct
+/// `sg.toml` path (many files commonly share one governing config, and
+/// repeating the same "your sg.toml is broken" message once per file
+/// would just be noise). Returns `None` when a config error was
+/// encountered - the caller should treat the file like a parse failure
+/// (same exit code, skip further processing) - `Some(_)` (possibly
+/// `Some(None)` for "no sg.toml at all") otherwise.
+fn load_file_config(
+    file: &Path,
+    cache: &mut ConfigCache,
+    reported: &mut HashSet<PathBuf>,
+) -> Option<Option<std::rc::Rc<config::RuleConfig>>> {
+    match cache.load_for_file(file) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            if reported.insert(e.path.clone()) {
+                eprintln!("error: {e}");
+            }
+            None
+        }
+    }
+}
+
 fn cmd_check(paths: &[PathBuf], json: bool, engine: bool, godot_path: Option<&Path>, engine_timeout: u64) -> ExitCode {
     let files = paths::collect_target_files(paths);
     let mut all: Vec<(PathBuf, Issue)> = Vec::new();
     let mut had_parse_error = false;
     let mut had_issue = false;
+    let mut config_cache = ConfigCache::new();
+    let mut reported_config_errors: HashSet<PathBuf> = HashSet::new();
 
     for file in &files {
         let source = match read_source(file) {
@@ -243,9 +272,13 @@ fn cmd_check(paths: &[PathBuf], json: bool, engine: bool, godot_path: Option<&Pa
                 continue;
             }
         };
+        let Some(file_config) = load_file_config(file, &mut config_cache, &mut reported_config_errors) else {
+            had_parse_error = true;
+            continue;
+        };
         match Document::parse(&source) {
             Ok(doc) => {
-                let issues = rules::check(&doc, file);
+                let issues = config::apply_to_issues(rules::check(&doc, file), file_config.as_deref());
                 if !issues.is_empty() {
                     had_issue = true;
                 }
@@ -308,6 +341,8 @@ fn cmd_fix(paths: &[PathBuf], dry_run: bool, keep_unused: bool) -> ExitCode {
     let files = paths::collect_target_files(paths);
     let mut had_parse_error = false;
     let mut had_remaining = false;
+    let mut config_cache = ConfigCache::new();
+    let mut reported_config_errors: HashSet<PathBuf> = HashSet::new();
 
     for file in &files {
         let source = match read_source(file) {
@@ -318,8 +353,12 @@ fn cmd_fix(paths: &[PathBuf], dry_run: bool, keep_unused: bool) -> ExitCode {
                 continue;
             }
         };
+        let Some(file_config) = load_file_config(file, &mut config_cache, &mut reported_config_errors) else {
+            had_parse_error = true;
+            continue;
+        };
 
-        let result = match fix::fix_file(file, &source, keep_unused) {
+        let result = match fix::fix_file(file, &source, keep_unused, file_config.as_deref()) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{}: parse error: {e}", file.display());

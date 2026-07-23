@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use scenegraph_core::{Document, Edit, ParseError};
 
+use crate::config::{self, RuleConfig};
 use crate::diff;
 use crate::rules::{self, FixPlan, Issue};
 
@@ -25,16 +26,25 @@ pub struct FixResult {
 
 /// Analyze and fix `source` (the file at `path`, used only for
 /// diagnostics/diff labeling - this never touches the filesystem). Callers
-/// decide whether to write `new_source` back out.
-pub fn fix_file(path: &Path, source: &str, keep_unused: bool) -> Result<FixResult, ParseError> {
+/// decide whether to write `new_source` back out. `config` is the
+/// `sg.toml`, if any, governing this file (see [`crate::config`]): it
+/// filters/remaps `before`/`after` exactly like `sg check` does, and a
+/// rule turned `off` is excluded from the repair plan as well as from
+/// reporting.
+pub fn fix_file(
+    path: &Path,
+    source: &str,
+    keep_unused: bool,
+    config: Option<&RuleConfig>,
+) -> Result<FixResult, ParseError> {
     let doc = Document::parse(source)?;
-    let before = rules::check(&doc, path);
-    let plan = rules::plan_fix(&doc, keep_unused);
-    let edits = build_edits(&doc, &plan);
+    let before = config::apply_to_issues(rules::check(&doc, path), config);
+    let plan = rules::plan_fix(&doc, keep_unused, config);
+    let edits = build_edits(&doc, &plan, config);
 
     let fixed_doc = if edits.is_empty() { doc } else { doc.apply_edits(edits) };
     let new_source = fixed_doc.serialize();
-    let after = rules::check(&fixed_doc, path);
+    let after = config::apply_to_issues(rules::check(&fixed_doc, path), config);
     let changed = new_source != source;
     let diff = diff::unified_diff(&path.display().to_string(), source, &new_source);
 
@@ -48,7 +58,7 @@ pub fn fix_file(path: &Path, source: &str, keep_unused: bool) -> Result<FixResul
     })
 }
 
-fn build_edits(doc: &Document, plan: &FixPlan) -> Vec<Edit> {
+fn build_edits(doc: &Document, plan: &FixPlan, config: Option<&RuleConfig>) -> Vec<Edit> {
     let mut edits = Vec::new();
 
     for &i in &plan.delete_sections {
@@ -66,7 +76,7 @@ fn build_edits(doc: &Document, plan: &FixPlan) -> Vec<Edit> {
             edits.extend(es);
         }
     }
-    if let Some(e) = build_load_steps_edit(doc, plan) {
+    if let Some(e) = build_load_steps_edit(doc, plan, config) {
         edits.push(e);
     }
 
@@ -77,7 +87,12 @@ fn build_edits(doc: &Document, plan: &FixPlan) -> Vec<Edit> {
 /// `plan.delete_sections` is applied, so this is computed last and
 /// independently of `rules::check`'s (pre-deletion) report - a single fix
 /// pass must never need a second pass just to re-correct this number.
-fn build_load_steps_edit(doc: &Document, plan: &FixPlan) -> Option<Edit> {
+/// Skipped entirely when `load-steps-mismatch` is off in `config`, the
+/// same as every other rule's fix contribution.
+fn build_load_steps_edit(doc: &Document, plan: &FixPlan, config: Option<&RuleConfig>) -> Option<Edit> {
+    if config.is_some_and(|c| c.is_off("load-steps-mismatch")) {
+        return None;
+    }
     let fd = doc.file_descriptor()?;
     let sections = doc.sections();
     let ext_count = sections

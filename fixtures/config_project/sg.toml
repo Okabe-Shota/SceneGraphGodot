@@ -1,0 +1,7 @@
+# sg.toml - demonstrates the two sg.toml mechanisms against this fixture's
+# scene.tscn: disabling a rule entirely, and promoting a rule's severity.
+# See README.md, "Configuration (sg.toml)".
+
+[rules]
+unused-ext-resource = "off"
+ext-resource-path-case-mismatch = "error"

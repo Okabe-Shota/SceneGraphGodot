@@ -1,0 +1,12 @@
+; Engine Configuration File.
+; Minimal fixture project used by crates/sg's sg.toml configuration tests
+; to exercise "off" (unused-ext-resource) and severity promotion
+; (ext-resource-path-case-mismatch) together. See README.md,
+; "Configuration (sg.toml)".
+
+config_version=5
+
+[application]
+
+config/name="sg_config_fixture"
+config/features=PackedStringArray("4.3")

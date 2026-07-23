@@ -546,6 +546,234 @@ fn composite_check_fix_check_demonstration() {
 }
 
 // ---------------------------------------------------------------------
+// Configuration (sg.toml)
+// ---------------------------------------------------------------------
+
+fn fresh_config_test_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("sg-config-test-{label}-{}-{n}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn config_project_fixture_demonstrates_off_and_promoted_severity() {
+    // fixtures/config_project/sg.toml disables unused-ext-resource and
+    // promotes ext-resource-path-case-mismatch to error; scene.tscn has
+    // exactly one of each.
+    let path = fixtures_dir().join("config_project").join("scene.tscn");
+    let (code, json) = run_check_json(&path);
+    assert_eq!(code, 1, "{json}");
+    assert!(!json.contains("unused-ext-resource"), "{json}");
+    assert!(json.contains("\"code\":\"ext-resource-path-case-mismatch\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+}
+
+#[test]
+fn fix_dry_run_does_not_touch_or_panic_on_config_project_fixture() {
+    let path = fixtures_dir().join("config_project").join("scene.tscn");
+    let original = read(&path);
+    let (code, _stdout, _err) = run_fix(&path, &["--dry-run"]);
+    assert!(code == 0 || code == 1, "unexpected exit code {code}");
+    assert_eq!(read(&path), original, "--dry-run must never modify the file");
+}
+
+#[test]
+fn sg_toml_off_disables_a_fixable_rule_from_being_reported_or_fixed() {
+    let path = copy_to_temp("04_child_before_parent.tscn");
+    let dir = path.parent().unwrap();
+    fs::write(dir.join("sg.toml"), "[rules]\nchild-before-parent = \"off\"\n").unwrap();
+    let original = read(&path);
+
+    let (check_code, json) = run_check_json(&path);
+    assert_eq!(check_code, 0, "{json}");
+    assert_eq!(json, "[]");
+
+    let (fix_code, _out, _err) = run_fix(&path, &[]);
+    assert_eq!(fix_code, 0);
+    assert_eq!(
+        read(&path),
+        original,
+        "a rule turned off must not be repaired by sg fix either"
+    );
+}
+
+#[test]
+fn sg_toml_severity_promotion_is_visible_in_text_and_json() {
+    let dir = fresh_config_test_dir("promote-severity");
+    fs::write(dir.join("project.godot"), "").unwrap();
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(dir.join("scripts").join("Player.gd"), "").unwrap();
+    fs::write(
+        dir.join("sg.toml"),
+        "[rules]\next-resource-path-case-mismatch = \"error\"\n",
+    )
+    .unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"Script\" path=\"res://scripts/player.gd\" id=\"1_scr\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "script = ExtResource(\"1_scr\")\n",
+        ),
+    )
+    .unwrap();
+
+    let (code, json) = run_check_json(&scene);
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"ext-resource-path-case-mismatch\""), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+
+    let output = sg().arg("check").arg(&scene).output().expect("failed to run sg check");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("error [ext-resource-path-case-mismatch]"), "{stdout}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sg_toml_severity_demotion_from_error_to_warning() {
+    // Exit-code semantics are unaffected by severity: a demoted rule that
+    // still fires is still exit code 1.
+    let dir = fresh_config_test_dir("demote-severity");
+    fs::write(dir.join("project.godot"), "").unwrap();
+    fs::write(
+        dir.join("sg.toml"),
+        "[rules]\nmissing-ext-resource-path = \"warning\"\n",
+    )
+    .unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=2 format=3]\n",
+            "\n",
+            "[ext_resource type=\"Script\" path=\"res://missing.gd\" id=\"1_missing\"]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+            "script = ExtResource(\"1_missing\")\n",
+        ),
+    )
+    .unwrap();
+
+    let (code, json) = run_check_json(&scene);
+    assert_eq!(code, 1, "{json}");
+    assert!(json.contains("\"code\":\"missing-ext-resource-path\""), "{json}");
+    assert!(json.contains("\"severity\":\"warning\""), "{json}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sg_toml_with_unknown_rule_name_is_a_config_error_at_the_parse_error_exit_code() {
+    let dir = fresh_config_test_dir("bad-config");
+    fs::write(dir.join("sg.toml"), "[rules]\nunused-ext-resuorce = \"off\"\n").unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let output = sg().arg("check").arg(&scene).output().expect("failed to run sg check");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sg.toml"), "{stderr}");
+    assert!(stderr.contains("unused-ext-resuorce"), "{stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sg_toml_with_invalid_value_is_a_config_error() {
+    let dir = fresh_config_test_dir("bad-value");
+    fs::write(dir.join("sg.toml"), "[rules]\nunused-ext-resource = \"disabled\"\n").unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let output = sg().arg("check").arg(&scene).output().expect("failed to run sg check");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sg.toml"), "{stderr}");
+    assert!(stderr.contains("disabled"), "{stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sg_toml_with_engine_code_is_rejected_as_not_configurable() {
+    let dir = fresh_config_test_dir("engine-code");
+    fs::write(dir.join("sg.toml"), "[rules]\nengine-load-failed = \"off\"\n").unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let output = sg().arg("check").arg(&scene).output().expect("failed to run sg check");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("engine"), "{stderr}");
+    assert!(stderr.contains("not configurable"), "{stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sg_toml_malformed_toml_is_a_config_error() {
+    let dir = fresh_config_test_dir("malformed-toml");
+    fs::write(dir.join("sg.toml"), "this is not [ valid toml\n").unwrap();
+    let scene = dir.join("scene.tscn");
+    fs::write(
+        &scene,
+        concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Node2D\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let output = sg().arg("check").arg(&scene).output().expect("failed to run sg check");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sg.toml"), "{stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn no_sg_toml_behaves_exactly_as_before() {
+    // No sg.toml anywhere above this fixture: built-in defaults apply,
+    // identical to every pre-existing (config-unaware) test in this file.
+    let (code, json) = run_check_json(&broken_fixture("01_load_steps_mismatch.tscn"));
+    assert_eq!(code, 1);
+    assert!(json.contains("\"code\":\"load-steps-mismatch\""), "{json}");
+    assert!(json.contains("\"severity\":\"warning\""), "{json}");
+}
+
+// ---------------------------------------------------------------------
 // The existing well-formed fixture corpus must already be clean.
 // ---------------------------------------------------------------------
 
