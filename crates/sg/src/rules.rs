@@ -13,6 +13,7 @@ use std::path::Path;
 use scenegraph_core::{collect_references, parse_complete, Document, Reference, ReferenceKind, SectionInfo};
 
 use crate::config::RuleConfig;
+use crate::nodegraph::{attr_str, build_node_graph, is_instanced, section_indices_of};
 use crate::paths::find_project_root;
 use crate::respath::{check_res_path, DirCache, PathCheck};
 
@@ -58,14 +59,6 @@ pub struct FixPlan {
     /// Same shape as `sub_resource_reorder`, for `node` sections ordered
     /// so every parent precedes its children.
     pub node_reorder: Option<(Vec<usize>, Vec<usize>)>,
-}
-
-fn attr_str<'a>(section: &'a SectionInfo, key: &str) -> Option<&'a str> {
-    section
-        .attrs
-        .iter()
-        .find(|(k, _)| k == key)
-        .and_then(|(_, v)| v.as_str())
 }
 
 /// Every `ExtResource`/`SubResource` reference appearing anywhere in one
@@ -125,101 +118,6 @@ fn declared_node_names(sections: &[SectionInfo]) -> HashMap<(Option<String>, Str
         map.entry((parent, name.to_string())).or_default().push(i);
     }
     map
-}
-
-fn section_indices_of<'a>(sections: &'a [SectionInfo], kind: &'a str) -> Vec<usize> {
-    sections
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.kind == kind)
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// A node's fully-qualified tree path, computed purely from its own
-/// `name`/`parent` attributes - independent of file order or of any other
-/// node having been seen yet. This is what makes parent-child resolution
-/// order-independent: a node's path is not built incrementally while
-/// walking the file, it is a pure function of its own header.
-fn node_full_path(name: &str, parent_attr: Option<&str>) -> String {
-    match parent_attr {
-        None => ".".to_string(),
-        Some(".") => name.to_string(),
-        Some(p) => format!("{p}/{name}"),
-    }
-}
-
-struct NodeGraph {
-    /// All node section indices, in file order.
-    node_indices: Vec<usize>,
-    /// index -> resolved parent index (`None` for the root). Only
-    /// populated for nodes whose parent resolved.
-    parent_of: HashMap<usize, usize>,
-    roots: Vec<usize>,
-    orphans: Vec<(usize, String)>, // (node index, unresolved parent path)
-    /// Every node's own root-relative path (see [`node_full_path`]) -> its
-    /// section index. This is the full set of paths *declared* in this
-    /// file, independent of whether the node's own `parent=` attribute
-    /// happens to resolve to anything (an orphan still declares its own
-    /// path just fine - see rule 4's `orphans` for that separate concern).
-    /// Used by the `broken-connection-node-path` rule to resolve
-    /// `[connection]` `from=`/`to=` targets.
-    path_to_index: HashMap<String, usize>,
-}
-
-fn build_node_graph(sections: &[SectionInfo]) -> NodeGraph {
-    let node_indices = section_indices_of(sections, "node");
-    let mut path_to_index: HashMap<String, usize> = HashMap::new();
-    let mut roots = Vec::new();
-    for &i in &node_indices {
-        let s = &sections[i];
-        let name = attr_str(s, "name").unwrap_or("");
-        let parent_attr = attr_str(s, "parent");
-        if parent_attr.is_none() {
-            roots.push(i);
-        }
-        path_to_index.insert(node_full_path(name, parent_attr), i);
-    }
-
-    let mut parent_of = HashMap::new();
-    let mut orphans = Vec::new();
-    for &i in &node_indices {
-        let s = &sections[i];
-        let Some(parent_attr) = attr_str(s, "parent") else {
-            continue; // root, no parent to resolve
-        };
-        match path_to_index.get(parent_attr) {
-            Some(&p) if p != i => {
-                parent_of.insert(i, p);
-            }
-            _ => orphans.push((i, parent_attr.to_string())),
-        }
-    }
-
-    NodeGraph {
-        node_indices,
-        parent_of,
-        roots,
-        orphans,
-        path_to_index,
-    }
-}
-
-/// Whether `section` carries an attribute named `key` at all, regardless
-/// of its value's type. Used for `instance`/`instance_placeholder`, whose
-/// values are not plain strings (`instance=ExtResource(...)`), so
-/// [`attr_str`] can't be used to detect their mere presence.
-fn has_attr(section: &SectionInfo, key: &str) -> bool {
-    section.attrs.iter().any(|(k, _)| k == key)
-}
-
-/// A node section is "instanced" when it stands in for the root of a
-/// scene this file cannot see into: either a full instantiation
-/// (`instance=ExtResource(...)`) or an editor instance placeholder
-/// (`instance_placeholder="res://..."`). Either way, anything declared
-/// underneath it in the *instanced* scene is invisible here.
-fn is_instanced(section: &SectionInfo) -> bool {
-    has_attr(section, "instance") || has_attr(section, "instance_placeholder")
 }
 
 /// Every strict ancestor path of `path`, in the same `.` / `Name` /

@@ -242,6 +242,7 @@ impl Document {
                         BodyLine::Property(p) => Some(PropertyInfo {
                             key: self.source[p.key_span.clone()].to_string(),
                             raw_value: self.source[p.value_span.clone()].trim().to_string(),
+                            line: crate::span::line_of(&self.source, p.full_span.start),
                         }),
                         _ => None,
                     })
@@ -342,6 +343,12 @@ pub struct PropertyInfo {
     /// Trimmed raw value text, exactly as written (not yet interpreted as
     /// a [`Value`]). Use [`crate::value::parse_complete`] to interpret it.
     pub raw_value: String,
+    /// 1-based line number where this property's `key = value` line
+    /// begins in the source. Most callers only need to know a property
+    /// exists (`key`/`raw_value`); this is for callers that need to point
+    /// at exactly where it was written, e.g. `sg i18n extract`'s
+    /// per-string reference lines.
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

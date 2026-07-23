@@ -1,0 +1,24 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="MainMenu" type="Control"]
+
+[node name="VBox" type="VBoxContainer" parent="."]
+
+[node name="TitleLabel" type="Label" parent="VBox"]
+text = "Welcome"
+
+[node name="StartButton" type="Button" parent="VBox"]
+text = "Start Game"
+tooltip_text = "Begin your adventure"
+
+[node name="NameInput" type="LineEdit" parent="VBox"]
+placeholder_text = "Enter your name"
+
+[node name="EmptyLabel" type="Label" parent="VBox"]
+text = ""
+
+[node name="CancelButton" type="Button" parent="VBox"]
+text = "Cancel"
+
+[node name="CloseButton" type="Button" parent="VBox"]
+text = "Cancel"

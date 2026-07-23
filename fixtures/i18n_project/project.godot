@@ -1,0 +1,10 @@
+; Engine Configuration File.
+; Minimal fixture project used by crates/sg's `sg i18n extract` tests to
+; exercise res:// path resolution. See README.md, "sg i18n extract".
+
+config_version=5
+
+[application]
+
+config/name="sg_i18n_fixture"
+config/features=PackedStringArray("4.3")

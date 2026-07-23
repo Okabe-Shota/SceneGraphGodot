@@ -5,7 +5,9 @@ mod config;
 mod diff;
 mod engine;
 mod fix;
+mod i18n;
 mod json;
+mod nodegraph;
 mod paths;
 mod respath;
 mod rules;
@@ -84,6 +86,30 @@ enum Command {
         #[arg(long)]
         keep_unused: bool,
     },
+    /// Localization tooling built on scenegraph-core's structural model.
+    /// See README.md, "sg i18n extract".
+    I18n {
+        #[command(subcommand)]
+        command: I18nCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum I18nCommand {
+    /// Scan scene files for translatable UI strings and emit a gettext PO
+    /// (default) or CSV translation file, with per-string context
+    /// (node type, screen, property, and a source reference).
+    Extract {
+        /// Files or directories to scan (directories are searched
+        /// recursively for *.tscn/*.tres, same as `sg check`).
+        paths: Vec<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "po")]
+        format: i18n::extract::Format,
+        /// Write the result to this file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -103,6 +129,9 @@ fn main() -> ExitCode {
             dry_run,
             keep_unused,
         } => cmd_fix(&paths, dry_run, keep_unused),
+        Command::I18n { command } => match command {
+            I18nCommand::Extract { paths, format, output } => i18n::extract::run(&paths, format, output.as_deref()),
+        },
     }
 }
 

@@ -18,21 +18,25 @@ information no one asked it to touch.
 - `crates/scenegraph-core` - the parser and structural data model, plus a
   small mutation layer (`src/edit.rs`) for surgical, span-exact edits. No
   required dependencies beyond the standard library.
-- `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`)
-  built on top of scenegraph-core. Depends on `clap` for argument parsing
-  and `toml` for `sg.toml` configuration (see "Configuration (`sg.toml`)"
-  below - the one deliberate exception to keeping the dependency footprint
-  small, since hand-rolling TOML's quoting/escaping/comment rules is not
-  worth it for one config file format); everything else (diffing, JSON
-  output) is still hand-rolled.
+- `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`,
+  `sg i18n extract`) built on top of scenegraph-core. `src/nodegraph.rs`
+  holds the node-graph reconstruction shared by `src/rules.rs` (structural
+  checks) and `src/i18n/` (the `sg i18n` command family). Depends on
+  `clap` for argument parsing and `toml` for `sg.toml` configuration (see
+  "Configuration (`sg.toml`)" below - the one deliberate exception to
+  keeping the dependency footprint small, since hand-rolling TOML's
+  quoting/escaping/comment rules is not worth it for one config file
+  format); everything else (diffing, JSON output, the PO/CSV writers in
+  `sg i18n extract`) is still hand-rolled.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
   suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
-  used by the `sg check`/`sg fix` test suite, and two minimal real Godot
+  used by the `sg check`/`sg fix` test suite, and minimal real Godot
   projects (a `project.godot` plus a handful of files) used by the rules
   that resolve `res://` paths against disk: `fixtures/engine_project/` for
-  `missing-ext-resource-path` and `sg check --engine` (see below), and
-  `fixtures/case_mismatch_project/` for `ext-resource-path-case-mismatch`.
+  `missing-ext-resource-path` and `sg check --engine` (see below),
+  `fixtures/case_mismatch_project/` for `ext-resource-path-case-mismatch`,
+  and `fixtures/i18n_project/` for `sg i18n extract`.
 
 ## Design
 
@@ -143,6 +147,12 @@ sg check path/to/scene_dir/ --json
 sg fix path/to/scene.tscn
 sg fix path/to/scene_dir/ --dry-run
 sg fix path/to/scene.tscn --keep-unused
+
+# Extract translatable UI strings into a PO or CSV file (see
+# "sg i18n extract" below).
+sg i18n extract path/to/scene_dir/
+sg i18n extract path/to/scene.tscn --format csv
+sg i18n extract path/to/scene_dir/ --output strings.po
 ```
 
 ## `sg check`
@@ -397,6 +407,111 @@ Two properties are enforced by the test suite in
   child-before-parent-only fixtures, the fixed output is compared
   byte-for-byte against a hand-derived expected string, confirming
   nothing outside the touched section(s) changed.
+
+## `sg i18n extract`
+
+The first of a planned `sg i18n` command family for localization tooling
+(`extract` today; `budget`, `shots`, and `check` are planned next - see
+`crates/sg/src/i18n/mod.rs`'s module doc comment). `extract` solves two
+common localization pains: spreadsheet round-tripping (translators
+usually work in a spreadsheet or a PO editor, not a `.tscn` file) and
+translators having no context for the strings they're given (a bare
+"OK" or "Cancel" with no idea which screen or control it belongs to).
+
+```sh
+sg i18n extract path/to/scene_dir/
+sg i18n extract path/to/scene.tscn --format csv
+sg i18n extract path/to/scene_dir/ --output strings.po
+```
+
+Accepts the same file/directory arguments as `sg check` (directories are
+searched recursively for `*.tscn`/`*.tres`, using the same path-expansion
+helper). Every `[node]` section across every scanned file is walked once,
+via the same node-graph reconstruction `sg check`'s rules use
+(`crates/sg/src/nodegraph.rs`, shared so the two can never disagree about
+a node's path), and the following property lines are read off of it:
+
+| Property | Typical nodes |
+|---|---|
+| `text` | `Label`, `Button`, `CheckBox`, `RichTextLabel`, etc. |
+| `tooltip_text` | Any `Control` |
+| `placeholder_text` | `LineEdit`, `TextEdit` |
+| `title` | `Window` and subclasses |
+| `dialog_text` | `AcceptDialog` and subclasses |
+
+This is a deliberate, extensible v1 list (`i18n::TRANSLATABLE_PROPERTIES`)
+- only non-empty string values are extracted (an empty `text = ""` is
+skipped, not emitted as a hollow entry). Array/items-valued text
+properties (`OptionButton`/`ItemList`'s `items`) are out of scope for v1;
+see the doc comment above `TRANSLATABLE_PROPERTIES` for why.
+
+Each extracted string carries context: the node's `type`, the scene's
+root node name (its "screen" identity), which property it came from, a
+`res://...` reference when the file sits inside a discoverable Godot
+project (same `project.godot` discovery as `sg check`'s `res://`-path
+rules - falls back to the scene's file path otherwise), the node's
+root-relative path within the scene, and the source line.
+
+### `--format po` (default)
+
+A minimal, hand-rolled gettext PO file. Every occurrence of the same
+exact text is merged into one entry, accumulating one `#.`
+extracted-comment line and one `#:` reference line per occurrence, with
+every `#.` line grouped before every `#:` line (never interleaved
+per-occurrence) - the standard gettext convention of grouping by comment
+*kind*, which is what `msgmerge`/`msgcat` normalize to and what
+Poedit/Crowdin/Weblate expect:
+
+```po
+#. Type: Button | Screen: MainMenu | Property: text
+#: res://ui/main_menu.tscn:VBox/StartButton
+msgid "Start Game"
+msgstr ""
+
+#. Type: Button | Screen: MainMenu | Property: text
+#. Type: Button | Screen: MainMenu | Property: text
+#: res://ui/main_menu.tscn:VBox/CancelButton
+#: res://ui/main_menu.tscn:VBox/CloseButton
+msgid "Cancel"
+msgstr ""
+```
+
+A minimal, valid PO header (`Content-Type: text/plain; charset=UTF-8`,
+`Content-Transfer-Encoding: 8bit`) is always emitted first, even when no
+translatable strings were found. `msgid` escaping covers backslash,
+double quote, newline, tab, and carriage return. Entries are emitted in
+first-occurrence order (the order each unique string was first seen while
+scanning) rather than sorted alphabetically by `msgid` - this keeps
+related strings from the same screen together instead of interleaving
+unrelated ones, while staying fully deterministic (re-running over
+unchanged input reproduces the file byte-for-byte, since scanning itself
+is deterministic).
+
+### `--format csv`
+
+A `key,source,context` CSV for reviewing in a spreadsheet, chosen over
+Godot's native `keys,<locale>` import shape because this command's job is
+translator-facing review (the context problem), not re-importing
+translations back into Godot - `.po`, which Godot can import directly, is
+already the primary format for that. Unlike PO, rows are **not** merged
+by text: one row per occurrence, so a translator sees every use in place
+with its own context (`Type: ... | Screen: ... | Property: ... | Ref:
+...`), since identical source text can legitimately need different
+translations in different places. Fields are quoted per RFC 4180 (wrapped
+in double quotes, with internal double quotes doubled, whenever a field
+contains a comma, a quote, or a newline).
+
+### `--output <FILE>`
+
+Writes the rendered result to `FILE` instead of stdout.
+
+### Exit codes
+
+`0` every input file scanned cleanly (an empty result - no translatable
+strings found - is not a failure), `2` at least one input file failed to
+read or parse (matching `sg check`/`sg fix`'s parse-error exit code;
+files that did scan cleanly still contribute their strings to the
+output), `1` the rendered output could not be written to `--output`.
 
 ## Development
 
