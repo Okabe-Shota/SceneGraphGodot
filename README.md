@@ -19,16 +19,17 @@ information no one asked it to touch.
   small mutation layer (`src/edit.rs`) for surgical, span-exact edits. No
   required dependencies beyond the standard library.
 - `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`,
-  `sg i18n extract`, `sg i18n budget`) built on top of scenegraph-core.
-  `src/nodegraph.rs` holds the node-graph reconstruction shared by
-  `src/rules.rs` (structural checks) and `src/i18n/` (the `sg i18n`
-  command family). Depends on `clap` for argument parsing and `toml` for
-  `sg.toml` configuration (see "Configuration (`sg.toml`)" below - the
-  one deliberate exception to keeping the dependency footprint small,
-  since hand-rolling TOML's quoting/escaping/comment rules is not worth
-  it for one config file format); everything else (diffing, JSON output,
-  the PO/CSV writers in `sg i18n extract`, the text-width estimation in
-  `sg i18n budget`) is still hand-rolled.
+  `sg i18n extract`, `sg i18n budget`, `sg i18n check`) built on top of
+  scenegraph-core. `src/nodegraph.rs` holds the node-graph reconstruction
+  shared by `src/rules.rs` (structural checks) and `src/i18n/` (the `sg
+  i18n` command family). Depends on `clap` for argument parsing and
+  `toml` for `sg.toml` configuration (see "Configuration (`sg.toml`)"
+  below - the one deliberate exception to keeping the dependency
+  footprint small, since hand-rolling TOML's quoting/escaping/comment
+  rules is not worth it for one config file format); everything else
+  (diffing, JSON output, the PO/CSV writers and reader in `sg i18n
+  extract`, the text-width estimation in `sg i18n budget`) is still
+  hand-rolled.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
   suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
@@ -37,7 +38,8 @@ information no one asked it to touch.
   that resolve `res://` paths against disk: `fixtures/engine_project/` for
   `missing-ext-resource-path` and `sg check --engine` (see below),
   `fixtures/case_mismatch_project/` for `ext-resource-path-case-mismatch`,
-  `fixtures/i18n_project/` for `sg i18n extract`, and
+  `fixtures/i18n_project/` for `sg i18n extract` and `sg i18n check`
+  (including its `translations.de.po` fixture), and
   `fixtures/i18n_budget_project/` for `sg i18n budget`.
 
 ## Design
@@ -418,7 +420,7 @@ Two properties are enforced by the test suite in
 ## `sg i18n extract`
 
 The first of a planned `sg i18n` command family for localization tooling
-(`extract` and `budget` today; `shots` and `check` are planned next - see
+(`extract`, `budget`, and `check` today; `shots` is planned next - see
 `crates/sg/src/i18n/mod.rs`'s module doc comment). `extract` solves two
 common localization pains: spreadsheet round-tripping (translators
 usually work in a spreadsheet or a PO editor, not a `.tscn` file) and
@@ -642,6 +644,128 @@ full-precision numbers; rounding only happens at render time.
 file failed to read or parse (matching `sg check`/`sg i18n extract`'s
 parse-error exit code, and taking priority over `1` the same way it does
 there).
+
+## `sg i18n check`
+
+The CI gate for the `sg i18n` family: one command, one exit code, designed
+to be dropped straight into a pull-request pipeline. It combines two
+independent localization gates:
+
+1. **Overflow** - reuses `sg i18n budget`'s scan exactly (the same
+   `budget::scan` function, not a reimplementation - see "DRY reuse"
+   below), so `sg i18n check`'s overflow results are always identical to
+   running `sg i18n budget` with the same flags. Runs by default; skip it
+   with `--no-overflow`.
+2. **Untranslated** - source strings that are missing from, or present
+   but empty in, a gettext PO file (typically one `sg i18n extract`
+   produced and a translator filled in). Only runs when `--against` is
+   given.
+
+```sh
+# Overflow gate only (no --against given).
+sg i18n check path/to/scene_dir/
+
+# Both gates: overflow, plus untranslated strings against a filled-in PO.
+sg i18n check path/to/scene_dir/ --against strings.de.po
+
+# Untranslated gate only.
+sg i18n check path/to/scene_dir/ --against strings.de.po --no-overflow
+```
+
+This is the intended `sg i18n` loop: `extract` a PO file, hand it to
+translators, then `check` it in CI on every PR so overflow risk and
+untranslated leakage are both caught before a bad translation state ships.
+
+### `--against <FILE.po>`
+
+A gettext PO file (`msgid`/`msgstr` pairs) to check every scanned scene's
+source strings against - most commonly one `sg i18n extract` produced,
+later filled in by translators. Parsing mirrors `extract`'s PO writer
+exactly (same escape set: `\\ \" \n \t \r`; same multi-line
+continuation-string convention), so a `sg i18n check --against` run
+against `sg i18n extract`'s own PO output always round-trips. A source
+string is a finding (`i18n-untranslated`, always severity `error`) when:
+
+- its text is **not a key** in the PO file at all - it was never
+  extracted or sent for translation (leaked past `sg i18n extract`), or
+- it **is** a key, but `msgstr` is **empty** - it was extracted but has
+  not been translated yet.
+
+Every *occurrence* is reported separately (one finding per node/property,
+not deduplicated by text) - the same convention `sg i18n budget` already
+uses for overflow findings, so a string used in two buttons and
+untranslated in both produces two findings, each at its own location.
+
+PO is single-target in v1: one `msgid`/`msgstr` pair per string, no
+per-locale sections to select between. Duplicate `msgid`s in the PO file
+resolve last-occurrence-wins; a malformed entry (an unterminated string,
+an unrecognized escape, a `msgid` with no following `msgstr`) is skipped
+rather than aborting the whole file - see `crates/sg/src/i18n/extract.rs`,
+`parse_po`'s doc comment for the exact policy.
+
+Without `--against`, the untranslated gate does not run at all - `sg i18n
+check` behaves as the overflow gate alone.
+
+### `--locale <CODE>`
+
+A cosmetic label (e.g. `de`) folded into untranslated-string messages only
+("... in the translation file for locale \"de\""). It does not change how
+`--against` is parsed in any way - PO being single-target in v1 means
+there is no per-locale section to select with it.
+
+### `--expansion` / `--default-font-size`
+
+Passed straight through to the overflow gate; same meaning and same
+defaults (`40`, `16`) as `sg i18n budget --expansion` /
+`--default-font-size`. See "`sg i18n budget`" above for what they mean.
+
+### `--no-overflow`
+
+Skip the overflow gate and run only the untranslated gate. Requires
+`--against` - passing `--no-overflow` with no `--against` leaves nothing
+for `sg i18n check` to do at all, which is a usage error (reported
+clearly on stderr, same exit code as a file error - see "Exit codes"
+below).
+
+### DRY reuse of the overflow gate
+
+`sg i18n check`'s overflow gate is not a second implementation: it calls
+`crate::i18n::budget::scan` - the exact function `sg i18n budget`'s own
+command wraps - and reuses `budget`'s `OverflowFinding` message/JSON
+rendering unchanged. The two commands can never silently disagree about
+what overflows, because there is only one place that decision is made.
+
+### Output
+
+Text lines match `sg check`'s `file:line: severity [code] message` shape.
+Findings from either gate are merged and sorted by `(file, line, code)`
+before being printed - deterministic regardless of which gate found what,
+or which order the two gates ran in:
+
+```
+fixtures/i18n_budget_project/menu.tscn:9: warning [i18n-text-overflow] "Settings" in Button "VBox/SettingsButton" may overflow: predicted ~76px (source ~54px +40%) exceeds ~70px available (custom_minimum_size, font_size 16)
+fixtures/i18n_project/main_menu.tscn:15: error [i18n-untranslated] "Enter your name" in LineEdit "VBox/NameInput" has no entry in the translation file (never extracted or sent for translation)
+fixtures/i18n_project/main_menu.tscn:21: error [i18n-untranslated] "Cancel" in Button "VBox/CancelButton" has an empty translation in the translation file (extracted but not yet translated)
+```
+
+`--json` emits a single array mixing both finding shapes. Overflow objects
+reuse `sg i18n budget --json`'s exact shape (`file`, `line`, `severity`,
+`code`, `string`, `node_path`, `node_type`, `property`, `available_px`,
+`source_px`, `predicted_px`, `expansion_percent`, `font_size`,
+`width_source`). Untranslated objects carry `file`, `line`,
+`severity: "error"`, `code: "i18n-untranslated"`, `string`, `node_path`,
+`node_type`, and `translation_state` (`"missing"` or `"empty"`).
+
+### Exit codes
+
+`0` clean (no finding from either gate), `1` at least one finding
+(an overflow warning or an untranslated error), `2` a file - a scanned
+scene, or the `--against` PO file - could not be read or parsed, **or**
+`--no-overflow` was given without `--against` (a usage error). This
+matches every other `sg`/`sg i18n` command's parse-error exit code, and
+clap's own usage-error exit code (both already `2` in this codebase) - a
+gate-usage error and a file error are not distinguishable by exit code
+alone, exactly like a plain clap argument-parsing error already is.
 
 ## Development
 

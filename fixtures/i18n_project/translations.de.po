@@ -1,0 +1,26 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. Type: Label | Screen: MainMenu | Property: text
+#: res://main_menu.tscn:VBox/TitleLabel
+msgid "Welcome"
+msgstr "Willkommen"
+
+#. Type: Button | Screen: MainMenu | Property: text
+#: res://main_menu.tscn:VBox/StartButton
+msgid "Start Game"
+msgstr "Spiel starten"
+
+#. Type: Button | Screen: MainMenu | Property: tooltip_text
+#: res://main_menu.tscn:VBox/StartButton
+msgid "Begin your adventure"
+msgstr "Beginne dein Abenteuer"
+
+#. Type: Button | Screen: MainMenu | Property: text
+#. Type: Button | Screen: MainMenu | Property: text
+#: res://main_menu.tscn:VBox/CancelButton
+#: res://main_menu.tscn:VBox/CloseButton
+msgid "Cancel"
+msgstr ""

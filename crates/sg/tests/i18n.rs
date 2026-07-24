@@ -398,3 +398,248 @@ fn budget_help_documents_expansion_default_font_size_json_and_their_defaults() {
     assert!(stdout.contains("40"), "{stdout}");
     assert!(stdout.contains("16"), "{stdout}");
 }
+
+// -----------------------------------------------------------------------
+// sg i18n check
+// -----------------------------------------------------------------------
+
+fn run_check(args: &[&str]) -> (i32, String, String) {
+    let output = sg()
+        .arg("i18n")
+        .arg("check")
+        .args(args)
+        .output()
+        .expect("failed to run sg i18n check");
+    (
+        output.status.code().expect("no exit code"),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+fn de_po() -> PathBuf {
+    i18n_fixture("translations.de.po")
+}
+
+#[test]
+fn check_against_reports_exactly_the_missing_and_empty_occurrences() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[scene.to_str().unwrap(), "--against", de_po().to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+
+    // "Enter your name" was never put in the PO file at all: missing.
+    assert!(stdout.contains("main_menu.tscn:15:"), "{stdout}");
+    assert!(stdout.contains("error [i18n-untranslated]"), "{stdout}");
+    assert!(stdout.contains("\"Enter your name\""), "{stdout}");
+    assert!(stdout.contains("VBox/NameInput"), "{stdout}");
+    assert!(stdout.contains("no entry"), "{stdout}");
+    assert!(stdout.contains("never extracted"), "{stdout}");
+
+    // "Cancel" is in the PO file but msgstr is empty: reported once per
+    // occurrence (CancelButton at line 21, CloseButton at line 24).
+    assert!(stdout.contains("main_menu.tscn:21:"), "{stdout}");
+    assert!(stdout.contains("VBox/CancelButton"), "{stdout}");
+    assert!(stdout.contains("main_menu.tscn:24:"), "{stdout}");
+    assert!(stdout.contains("VBox/CloseButton"), "{stdout}");
+    assert_eq!(stdout.matches("empty translation").count(), 2, "{stdout}");
+
+    // "Welcome", "Start Game", "Begin your adventure" are fully
+    // translated - never mentioned.
+    assert!(!stdout.contains("\"Welcome\""), "{stdout}");
+    assert!(!stdout.contains("\"Start Game\""), "{stdout}");
+    assert!(!stdout.contains("\"Begin your adventure\""), "{stdout}");
+
+    // main_menu.tscn sets no control geometry at all, so the (default,
+    // still-enabled) overflow gate finds nothing.
+    assert!(!stdout.contains("i18n-text-overflow"), "{stdout}");
+
+    // Exactly three findings total.
+    assert_eq!(stdout.lines().count(), 3, "{stdout}");
+}
+
+#[test]
+fn check_without_against_runs_the_overflow_gate_only() {
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, stderr) = run_check(&[menu.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("warning [i18n-text-overflow]"), "{stdout}");
+    assert!(stdout.contains(EXPECTED_SETTINGS_MESSAGE), "{stdout}");
+    assert!(!stdout.contains("i18n-untranslated"), "{stdout}");
+}
+
+#[test]
+fn check_no_overflow_without_against_is_a_usage_error() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[scene.to_str().unwrap(), "--no-overflow"]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("--no-overflow"), "{stderr}");
+    assert!(stderr.contains("--against"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+#[test]
+fn check_no_overflow_with_against_runs_untranslated_gate_only() {
+    // The budget fixture's menu.tscn has real overflow risk (see
+    // fixtures/i18n_budget_project/menu.tscn / sg i18n budget's own
+    // tests), but none of its strings are in translations.de.po at all -
+    // --no-overflow must suppress every i18n-text-overflow line while
+    // still reporting the (many) i18n-untranslated ones.
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, stderr) = run_check(&[
+        menu.to_str().unwrap(),
+        "--against",
+        de_po().to_str().unwrap(),
+        "--no-overflow",
+    ]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(!stdout.contains("i18n-text-overflow"), "{stdout}");
+    assert!(stdout.contains("i18n-untranslated"), "{stdout}");
+    assert!(stdout.contains("\"Settings\""), "{stdout}");
+}
+
+#[test]
+fn check_combined_run_reports_both_codes_in_deterministic_file_order() {
+    let budget_menu = budget_fixture("menu.tscn");
+    let project_menu = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[
+        budget_menu.to_str().unwrap(),
+        project_menu.to_str().unwrap(),
+        "--against",
+        de_po().to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("i18n-text-overflow"), "{stdout}");
+    assert!(stdout.contains("i18n-untranslated"), "{stdout}");
+
+    // Deterministic ordering: by file path, so every
+    // i18n_budget_project/menu.tscn line precedes every
+    // i18n_project/main_menu.tscn line ("i18n_budget_project" <
+    // "i18n_project" lexically).
+    let last_budget_line = stdout
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains("i18n_budget_project"))
+        .map(|(i, _)| i)
+        .last();
+    let first_project_line = stdout
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains("i18n_project"))
+        .map(|(i, _)| i)
+        .next();
+    if let (Some(last_b), Some(first_p)) = (last_budget_line, first_project_line) {
+        assert!(last_b < first_p, "{stdout}");
+    }
+}
+
+#[test]
+fn check_json_shape_for_untranslated_findings() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[
+        scene.to_str().unwrap(),
+        "--against",
+        de_po().to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.trim_start().starts_with('['), "{stdout}");
+    assert!(stdout.trim_end().ends_with(']'), "{stdout}");
+    assert!(stdout.contains("\"code\":\"i18n-untranslated\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"error\""), "{stdout}");
+    assert!(stdout.contains("\"translation_state\":\"missing\""), "{stdout}");
+    assert!(stdout.contains("\"translation_state\":\"empty\""), "{stdout}");
+    assert!(stdout.contains("\"node_path\":\"VBox/NameInput\""), "{stdout}");
+    assert!(stdout.contains("\"node_type\":\"LineEdit\""), "{stdout}");
+}
+
+#[test]
+fn check_json_shape_for_overflow_findings_matches_budgets_shape() {
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, stderr) = run_check(&[menu.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("\"code\":\"i18n-text-overflow\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"warning\""), "{stdout}");
+    assert!(stdout.contains("\"width_source\":\"custom_minimum_size\""), "{stdout}");
+    assert!(stdout.contains("\"available_px\":70"), "{stdout}");
+}
+
+#[test]
+fn check_locale_flag_is_included_in_untranslated_messages() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[
+        scene.to_str().unwrap(),
+        "--against",
+        de_po().to_str().unwrap(),
+        "--locale",
+        "de",
+    ]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("locale \"de\""), "{stdout}");
+}
+
+#[test]
+fn check_fully_translated_and_no_overflow_scene_exits_zero() {
+    let dir = fresh_temp_dir("check-clean");
+    let po_path = dir.join("full.po");
+    fs::write(
+        &po_path,
+        concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\"Content-Type: text/plain; charset=UTF-8\\n\"\n",
+            "\n",
+            "msgid \"Welcome\"\n",
+            "msgstr \"Willkommen\"\n",
+            "\n",
+            "msgid \"Start Game\"\n",
+            "msgstr \"Spiel starten\"\n",
+            "\n",
+            "msgid \"Begin your adventure\"\n",
+            "msgstr \"Beginne dein Abenteuer\"\n",
+            "\n",
+            "msgid \"Enter your name\"\n",
+            "msgstr \"Gib deinen Namen ein\"\n",
+            "\n",
+            "msgid \"Cancel\"\n",
+            "msgstr \"Abbrechen\"\n",
+        ),
+    )
+    .unwrap();
+
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_check(&[scene.to_str().unwrap(), "--against", po_path.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_reports_an_error_and_exit_2_for_an_unreadable_against_file() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let missing_po = fixtures_dir().join("does_not_exist.po");
+    let (code, _stdout, stderr) = run_check(&[scene.to_str().unwrap(), "--against", missing_po.to_str().unwrap()]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("error"), "{stderr}");
+}
+
+#[test]
+fn check_reports_an_error_and_exit_2_for_a_missing_scene_file() {
+    let (code, _stdout, stderr) = run_check(&[fixtures_dir().join("does_not_exist.tscn").to_str().unwrap()]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("error"), "{stderr}");
+}
+
+#[test]
+fn check_help_documents_all_flags_and_their_defaults() {
+    let (code, stdout, _) = run_check(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("--against"), "{stdout}");
+    assert!(stdout.contains("--locale"), "{stdout}");
+    assert!(stdout.contains("--expansion"), "{stdout}");
+    assert!(stdout.contains("--default-font-size"), "{stdout}");
+    assert!(stdout.contains("--no-overflow"), "{stdout}");
+    assert!(stdout.contains("--json"), "{stdout}");
+    assert!(stdout.contains("40"), "{stdout}");
+    assert!(stdout.contains("16"), "{stdout}");
+}

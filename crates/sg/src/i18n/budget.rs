@@ -455,7 +455,12 @@ fn char_width_em(c: char) -> f64 {
 // JSON rendering
 // ---------------------------------------------------------------------
 
-fn finding_json(f: &OverflowFinding) -> String {
+/// Render one finding as a JSON object (the element shape [`render_json`]
+/// joins into an array). `pub(crate)` rather than private: `sg i18n
+/// check` reuses this directly for its own combined `--json` array so
+/// that an overflow finding's JSON shape is defined in exactly one place
+/// - here - regardless of which command emits it.
+pub(crate) fn finding_json(f: &OverflowFinding) -> String {
     format!(
         concat!(
             "{{\"file\":\"{}\",\"line\":{},\"severity\":\"warning\",\"code\":\"{}\",",

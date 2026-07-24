@@ -3,6 +3,7 @@
 //! [`crate::i18n`], and formats the result as a gettext PO file (default)
 //! or a translator-facing CSV.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -217,6 +218,189 @@ fn render_csv(records: &[TranslatableString]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------
+// PO reader
+// ---------------------------------------------------------------------
+
+/// `msgid -> msgstr`, as read by [`parse_po`].
+pub(crate) type PoMap = HashMap<String, String>;
+
+/// Parse a minimal gettext PO file into a `msgid -> msgstr` map - the
+/// mirror image of [`render_po`]: same escape set (`\\ \" \n \t \r`, via
+/// [`parse_po_string_literal`]), same multi-line continuation-string
+/// convention (a bare quoted line immediately following a `msgid`/
+/// `msgstr` line concatenates onto it, exactly how `render_po`'s own
+/// header emits its two `"Content-Type: ...\n"`-style lines after
+/// `msgstr ""`). Used by `sg i18n check`'s untranslated gate to load a
+/// translator-filled `--against` file.
+///
+/// Policies:
+/// - The header entry (empty `msgid`) is always skipped - it is never a
+///   real source string, so it is never a key in the returned map.
+/// - Comment lines (`#`, `#.`, `#:`, `#,`, ...) and blank lines are
+///   ignored wherever they appear between entries.
+/// - Duplicate `msgid`s: **the last occurrence in the file wins** - a
+///   later entry overwrites an earlier one with the same `msgid` (a plain
+///   `HashMap::insert` per entry, applied top-to-bottom, gives this for
+///   free). This matches treating a hand-edited file's most recent copy
+///   of a duplicated entry as the intended one.
+/// - A malformed entry - an unterminated string, an unrecognized escape,
+///   trailing content after a string's closing quote, or a `msgid` line
+///   with no following `msgstr` line - is **skipped entirely** rather
+///   than making the whole file unreadable or panicking: parsing resumes
+///   at the next blank-line-separated entry (see [`skip_to_blank`]).
+///   This mirrors the project's general tolerant-parsing stance elsewhere
+///   (`scenegraph_core::Document::parse_tolerant`) - a single corrupted
+///   hand-edit should not sink an otherwise-usable translation file.
+///
+/// A present-but-empty `msgstr` is kept in the map as `""`, not treated
+/// the same as "absent": callers (`sg i18n check`) need to distinguish
+/// "never extracted" (key absent) from "extracted but not yet translated"
+/// (key present, value empty).
+pub(crate) fn parse_po(source: &str) -> PoMap {
+    let mut map = PoMap::new();
+    let lines: Vec<&str> = source.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if line.is_empty() || line.starts_with('#') {
+            i += 1;
+            continue;
+        }
+
+        let (keyword, rest) = split_keyword(line);
+        if keyword != "msgid" {
+            // Not an entry-opening line (stray text, or an unsupported
+            // keyword such as `msgid_plural` - not needed for `sg i18n`,
+            // whose PO files are always single-target). Skip and keep
+            // looking for the next `msgid`.
+            i += 1;
+            continue;
+        }
+
+        let Some(mut msgid) = parse_po_string_literal(rest) else {
+            i = skip_to_blank(&lines, i + 1);
+            continue;
+        };
+        i += 1;
+        i = consume_continuation(&lines, i, &mut msgid);
+
+        if i >= lines.len() {
+            break; // malformed: msgid with no msgstr at all, then EOF
+        }
+        let (keyword2, rest2) = split_keyword(lines[i].trim());
+        if keyword2 != "msgstr" {
+            i = skip_to_blank(&lines, i);
+            continue;
+        }
+        let Some(mut msgstr) = parse_po_string_literal(rest2) else {
+            i = skip_to_blank(&lines, i + 1);
+            continue;
+        };
+        i += 1;
+        i = consume_continuation(&lines, i, &mut msgstr);
+
+        if !msgid.is_empty() {
+            map.insert(msgid, msgstr); // last occurrence wins
+        }
+    }
+    map
+}
+
+/// Split `line` (already trimmed) into its first whitespace-delimited
+/// token and the (start-trimmed) remainder of the line - used to
+/// recognize the `msgid`/`msgstr` keywords without also matching a
+/// longer keyword that merely starts with the same letters (e.g.
+/// `msgid_plural`).
+fn split_keyword(line: &str) -> (&str, &str) {
+    match line.find(char::is_whitespace) {
+        Some(idx) => (&line[..idx], line[idx..].trim_start()),
+        None => (line, ""),
+    }
+}
+
+/// Consume every subsequent bare-quoted continuation line (no keyword
+/// prefix) starting at `i`, appending each one's decoded content to
+/// `into` in order. Stops at the first line that is not a well-formed,
+/// self-contained quoted literal (including a line that is not quoted at
+/// all) or at end of input. Returns the index of the first line not
+/// consumed.
+fn consume_continuation(lines: &[&str], mut i: usize, into: &mut String) -> usize {
+    while i < lines.len() {
+        let l = lines[i].trim();
+        if !l.starts_with('"') {
+            break;
+        }
+        match parse_po_string_literal(l) {
+            Some(s) => {
+                into.push_str(&s);
+                i += 1;
+            }
+            None => break,
+        }
+    }
+    i
+}
+
+/// Recover from a malformed entry by advancing past it: skip forward to
+/// the next blank line (exclusive - the blank line itself is left for the
+/// outer loop, which already skips blank lines) or to end of input. Note
+/// this may also skip a well-formed entry that immediately follows the
+/// malformed one with no blank-line separator - an edge case that never
+/// arises in any well-formed PO file, since entries are always
+/// blank-line-separated (exactly how [`render_po`] itself always emits
+/// them).
+fn skip_to_blank(lines: &[&str], mut i: usize) -> usize {
+    while i < lines.len() && !lines[i].trim().is_empty() {
+        i += 1;
+    }
+    i
+}
+
+/// Parse a single PO string literal (`"..."`, with backslash escapes)
+/// that must consume the entirety of `line` (already trimmed). Mirrors
+/// [`escape_po_string`] in reverse: `\\` `\"` `\n` `\t` `\r`. `None` for
+/// anything that is not a complete, well-formed literal: a missing
+/// opening or closing quote, an unterminated string, a trailing
+/// (unescaped) backslash, an unrecognized escape sequence, or trailing
+/// content after the closing quote.
+fn parse_po_string_literal(line: &str) -> Option<String> {
+    let mut chars = line.chars();
+    if chars.next() != Some('"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    let mut closed = false;
+    for c in chars.by_ref() {
+        if escaped {
+            out.push(match c {
+                '\\' => '\\',
+                '"' => '"',
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                _ => return None, // unrecognized escape: malformed
+            });
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            closed = true;
+            break;
+        } else {
+            out.push(c);
+        }
+    }
+    if !closed || escaped {
+        return None;
+    }
+    if chars.next().is_some() {
+        return None; // trailing content after the closing quote
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +604,183 @@ mod tests {
         r.res_path = None;
         r.scene_path = PathBuf::from("scenes/menu.tscn");
         assert_eq!(reference(&r), "scenes/menu.tscn:Node");
+    }
+
+    // -----------------------------------------------------------------
+    // PO reader (parse_po)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parses_a_single_translated_entry() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\"Content-Type: text/plain; charset=UTF-8\\n\"\n",
+            "\n",
+            "msgid \"Start Game\"\n",
+            "msgstr \"Spiel starten\"\n",
+        );
+        let map = parse_po(po);
+        assert_eq!(map.get("Start Game").map(String::as_str), Some("Spiel starten"));
+    }
+
+    #[test]
+    fn header_entry_with_empty_msgid_is_skipped() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\"Content-Type: text/plain; charset=UTF-8\\n\"\n",
+        );
+        let map = parse_po(po);
+        assert!(map.is_empty(), "{map:?}");
+        assert!(!map.contains_key(""));
+    }
+
+    #[test]
+    fn multi_line_continuation_strings_concatenate() {
+        // Mirrors how render_po's own header emits msgstr "" followed by
+        // bare-quoted continuation lines.
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"Long\"\n",
+            "msgstr \"\"\n",
+            "\"first part \"\n",
+            "\"second part\"\n",
+        );
+        let map = parse_po(po);
+        assert_eq!(map.get("Long").map(String::as_str), Some("first part second part"));
+    }
+
+    #[test]
+    fn round_trips_every_escape_the_writer_escapes() {
+        // Round-trip through the writer's own escaping (escape_po_string)
+        // and back through the reader (parse_po) must reproduce the
+        // original text exactly, for every escape the writer emits.
+        let original = "a\"b\\c\nd\te\rf";
+        let po = format!(
+            "msgid \"\"\nmsgstr \"\"\n\nmsgid \"{}\"\nmsgstr \"ok\"\n",
+            escape_po_string(original)
+        );
+        let map = parse_po(&po);
+        assert_eq!(map.get(original).map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn writer_output_parsed_back_yields_the_original_msgids() {
+        let records = vec![
+            record("Start Game", "VBox/StartButton", "text"),
+            record("Say \"hi\", friend\nnewline", "VBox/Label", "text"),
+        ];
+        let po = render_po(&records);
+        let map = parse_po(&po);
+        assert!(map.contains_key("Start Game"), "{map:?}");
+        assert!(map.contains_key("Say \"hi\", friend\nnewline"), "{map:?}");
+        // extract's own writer always emits an empty msgstr - both keys
+        // must be present with an empty translation, not absent.
+        assert_eq!(map.get("Start Game").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn empty_msgstr_is_present_in_the_map_not_absent() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"Cancel\"\n",
+            "msgstr \"\"\n",
+        );
+        let map = parse_po(po);
+        assert_eq!(map.get("Cancel").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn a_msgid_never_written_is_simply_absent() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"Cancel\"\n",
+            "msgstr \"Abbrechen\"\n",
+        );
+        let map = parse_po(po);
+        assert!(!map.contains_key("Never Extracted"));
+    }
+
+    #[test]
+    fn comment_lines_are_ignored() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "#. Type: Button | Screen: MainMenu | Property: text\n",
+            "#: res://main_menu.tscn:VBox/StartButton\n",
+            "#, fuzzy\n",
+            "# a plain translator comment\n",
+            "msgid \"Start Game\"\n",
+            "msgstr \"Spiel starten\"\n",
+        );
+        let map = parse_po(po);
+        assert_eq!(map.get("Start Game").map(String::as_str), Some("Spiel starten"));
+    }
+
+    #[test]
+    fn duplicate_msgid_last_occurrence_wins() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"Cancel\"\n",
+            "msgstr \"Abbrechen\"\n",
+            "\n",
+            "msgid \"Cancel\"\n",
+            "msgstr \"Zweite Übersetzung\"\n",
+        );
+        let map = parse_po(po);
+        assert_eq!(map.get("Cancel").map(String::as_str), Some("Zweite Übersetzung"));
+    }
+
+    #[test]
+    fn malformed_entry_with_an_unterminated_string_is_skipped_not_fatal() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"Broken\n", // missing closing quote: malformed
+            "msgstr \"whatever\"\n",
+            "\n",
+            "msgid \"Fine\"\n",
+            "msgstr \"OK\"\n",
+        );
+        let map = parse_po(po);
+        assert!(!map.contains_key("Broken"), "{map:?}");
+        // Parsing must recover and still pick up the entry that follows.
+        assert_eq!(map.get("Fine").map(String::as_str), Some("OK"));
+    }
+
+    #[test]
+    fn malformed_entry_missing_msgstr_entirely_is_skipped_not_fatal() {
+        let po = concat!(
+            "msgid \"\"\n",
+            "msgstr \"\"\n",
+            "\n",
+            "msgid \"NoTranslationLineAtAll\"\n",
+            "\n",
+            "msgid \"Fine\"\n",
+            "msgstr \"OK\"\n",
+        );
+        let map = parse_po(po);
+        assert!(!map.contains_key("NoTranslationLineAtAll"), "{map:?}");
+        assert_eq!(map.get("Fine").map(String::as_str), Some("OK"));
+    }
+
+    #[test]
+    fn parse_po_never_panics_on_a_blank_or_garbage_file() {
+        assert!(parse_po("").is_empty());
+        assert!(parse_po("\n\n\n").is_empty());
+        assert!(parse_po("not a po file at all").is_empty());
+        assert!(parse_po("msgid").is_empty());
+        assert!(parse_po("msgid \"unterminated").is_empty());
     }
 }

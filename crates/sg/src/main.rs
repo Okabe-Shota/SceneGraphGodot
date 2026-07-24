@@ -1,5 +1,11 @@
 //! `sg`: command-line tool for inspecting and validating Godot text
 //! resource files (`.tscn` / `.tres`) using scenegraph-core.
+//!
+//! Note: `sg check` (this file's [`Command::Check`], structural checks)
+//! and `sg i18n check` ([`i18n::check`], the localization CI gate) are
+//! unrelated commands that happen to share the word "check" - clap keeps
+//! them apart because one is nested under `sg i18n` and the other is
+//! not.
 
 mod config;
 mod diff;
@@ -133,6 +139,46 @@ enum I18nCommand {
         #[arg(long)]
         json: bool,
     },
+    /// CI gate for the `sg i18n` family: predicted text overflow (reusing
+    /// `sg i18n budget`'s logic exactly) plus, when --against is given,
+    /// untranslated-string leakage against a gettext PO file. One command,
+    /// one exit code - designed to be dropped straight into CI. See
+    /// README.md, "sg i18n check".
+    Check {
+        /// Files or directories to scan (directories are searched
+        /// recursively for *.tscn/*.tres, same as `sg check`).
+        paths: Vec<PathBuf>,
+        /// Gettext PO file (msgid/msgstr) to check source strings
+        /// against. Enables the untranslated-string gate; omit to run
+        /// the overflow gate only. PO is single-target in v1 (one
+        /// msgid/msgstr pair per string) - there is no per-locale
+        /// section to select.
+        #[arg(long)]
+        against: Option<PathBuf>,
+        /// Cosmetic label for the target locale (e.g. "de"), included in
+        /// untranslated-string messages only. Does not change how
+        /// --against is parsed.
+        #[arg(long)]
+        locale: Option<String>,
+        /// Percent the estimated source-text width is expanded by before
+        /// comparing it against a control's available width - same
+        /// meaning and default as `sg i18n budget --expansion`.
+        #[arg(long, default_value_t = i18n::budget::DEFAULT_EXPANSION_PERCENT)]
+        expansion: u32,
+        /// Font size in px assumed for a control that sets no
+        /// `theme_override_font_sizes/font_size` of its own - same
+        /// meaning and default as `sg i18n budget --default-font-size`.
+        #[arg(long, default_value_t = i18n::budget::DEFAULT_FONT_SIZE_PX)]
+        default_font_size: u32,
+        /// Skip the overflow gate and run only the untranslated-string
+        /// gate. Requires --against - without it, no gate would run at
+        /// all, which is a usage error.
+        #[arg(long)]
+        no_overflow: bool,
+        /// Emit a machine-readable JSON array instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -160,6 +206,23 @@ fn main() -> ExitCode {
                 default_font_size,
                 json,
             } => i18n::budget::run(&paths, expansion, default_font_size, json),
+            I18nCommand::Check {
+                paths,
+                against,
+                locale,
+                expansion,
+                default_font_size,
+                no_overflow,
+                json,
+            } => i18n::check::run(
+                &paths,
+                against.as_deref(),
+                locale.as_deref(),
+                expansion,
+                default_font_size,
+                no_overflow,
+                json,
+            ),
         },
     }
 }
