@@ -30,6 +30,23 @@ pub(crate) fn has_attr(section: &SectionInfo, key: &str) -> bool {
     section.attrs.iter().any(|(k, _)| k == key)
 }
 
+/// Find the raw (unparsed, trimmed) value text of the first property
+/// named `key` in a node section's body (`section.properties`), if any.
+/// Unlike header attributes (already parsed into a [`scenegraph_core::Value`]
+/// by `Document::sections`), property values stay as unparsed text - see
+/// [`scenegraph_core::PropertyInfo`] - so a caller that needs a typed value
+/// parses `raw_value` itself, e.g. via [`scenegraph_core::parse_complete`].
+/// Used by [`crate::i18n::budget`] to read control-geometry properties
+/// (`custom_minimum_size`, `offset_left`, `anchor_left`, ...) off the same
+/// per-node walk `sg i18n extract` already does.
+pub(crate) fn property_raw<'a>(section: &'a SectionInfo, key: &str) -> Option<&'a str> {
+    section
+        .properties
+        .iter()
+        .find(|p| p.key == key)
+        .map(|p| p.raw_value.as_str())
+}
+
 /// A node section is "instanced" when it stands in for the root of a
 /// scene this file cannot see into: either a full instantiation
 /// (`instance=ExtResource(...)`) or an editor instance placeholder
@@ -116,5 +133,40 @@ pub(crate) fn build_node_graph(sections: &[SectionInfo]) -> NodeGraph {
         roots,
         orphans,
         path_to_index,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scenegraph_core::Document;
+
+    #[test]
+    fn property_raw_finds_a_body_property_by_key() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Control\"]\n",
+            "custom_minimum_size = Vector2(80, 32)\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let sections = doc.sections();
+        assert_eq!(
+            property_raw(&sections[1], "custom_minimum_size"),
+            Some("Vector2(80, 32)")
+        );
+    }
+
+    #[test]
+    fn property_raw_returns_none_for_a_missing_key() {
+        let src = concat!(
+            "[gd_scene load_steps=1 format=3]\n",
+            "\n",
+            "[node name=\"Main\" type=\"Control\"]\n",
+            "text = \"Hi\"\n",
+        );
+        let doc = Document::parse(src).unwrap();
+        let sections = doc.sections();
+        assert_eq!(property_raw(&sections[1], "custom_minimum_size"), None);
     }
 }

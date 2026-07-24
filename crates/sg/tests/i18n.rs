@@ -13,6 +13,10 @@ fn i18n_fixture(name: &str) -> PathBuf {
     fixtures_dir().join("i18n_project").join(name)
 }
 
+fn budget_fixture(name: &str) -> PathBuf {
+    fixtures_dir().join("i18n_budget_project").join(name)
+}
+
 fn sg() -> Command {
     Command::new(env!("CARGO_BIN_EXE_sg"))
 }
@@ -244,4 +248,153 @@ fn extract_help_documents_format_and_output_flags() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--format"), "{stdout}");
     assert!(stdout.contains("--output"), "{stdout}");
+}
+
+// -----------------------------------------------------------------------
+// sg i18n budget
+// -----------------------------------------------------------------------
+
+fn run_budget(args: &[&str]) -> (i32, String, String) {
+    let output = sg()
+        .arg("i18n")
+        .arg("budget")
+        .args(args)
+        .output()
+        .expect("failed to run sg i18n budget");
+    (
+        output.status.code().expect("no exit code"),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+const EXPECTED_SETTINGS_MESSAGE: &str = "\"Settings\" in Button \"VBox/SettingsButton\" may overflow: predicted ~76px (source ~54px +40%) exceeds ~70px available (custom_minimum_size, font_size 16)";
+
+#[test]
+fn budget_flags_the_overflowing_fixed_width_button_and_exits_one() {
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, stderr) = run_budget(&[menu.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("menu.tscn:9:"), "{stdout}");
+    assert!(stdout.contains("warning [i18n-text-overflow]"), "{stdout}");
+    assert!(stdout.contains(EXPECTED_SETTINGS_MESSAGE), "{stdout}");
+}
+
+#[test]
+fn budget_does_not_flag_a_short_text_that_fits_its_fixed_width_button() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(!stdout.contains("OkButton"), "{stdout}");
+}
+
+#[test]
+fn budget_skips_a_label_with_autowrap_enabled() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(!stdout.contains("HintLabel"), "{stdout}");
+}
+
+#[test]
+fn budget_skips_a_control_whose_anchors_stretch_horizontally() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(!stdout.contains("Banner"), "{stdout}");
+}
+
+#[test]
+fn budget_flags_a_cjk_string_that_overflows_a_narrow_fixed_width_button() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(stdout.contains("LanguageButton"), "{stdout}");
+    assert!(stdout.contains("設定"), "{stdout}");
+}
+
+#[test]
+fn budget_json_shape_includes_every_documented_field() {
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, stderr) = run_budget(&[menu.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.trim_start().starts_with('['), "{stdout}");
+    assert!(stdout.trim_end().ends_with(']'), "{stdout}");
+    assert!(stdout.contains("\"code\":\"i18n-text-overflow\""), "{stdout}");
+    assert!(stdout.contains("\"severity\":\"warning\""), "{stdout}");
+    assert!(stdout.contains("\"string\":\"Settings\""), "{stdout}");
+    assert!(stdout.contains("\"node_path\":\"VBox/SettingsButton\""), "{stdout}");
+    assert!(stdout.contains("\"node_type\":\"Button\""), "{stdout}");
+    assert!(stdout.contains("\"property\":\"text\""), "{stdout}");
+    assert!(stdout.contains("\"available_px\":70"), "{stdout}");
+    assert!(stdout.contains("\"source_px\":54"), "{stdout}");
+    assert!(stdout.contains("\"predicted_px\":76"), "{stdout}");
+    assert!(stdout.contains("\"expansion_percent\":40"), "{stdout}");
+    assert!(stdout.contains("\"font_size\":16"), "{stdout}");
+    assert!(stdout.contains("\"width_source\":\"custom_minimum_size\""), "{stdout}");
+}
+
+#[test]
+fn budget_expansion_zero_drops_the_boundary_warning_but_keeps_the_cjk_one() {
+    let menu = budget_fixture("menu.tscn");
+    let (code, stdout, _) = run_budget(&[menu.to_str().unwrap(), "--expansion", "0"]);
+    // At 0% expansion, "Settings" (source ~54px) fits its 70px button and
+    // must no longer warn...
+    assert!(!stdout.contains("SettingsButton"), "{stdout}");
+    // ...but the CJK button (source 32px vs a 30px available width) still
+    // overflows even with no expansion applied at all.
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("LanguageButton"), "{stdout}");
+}
+
+#[test]
+fn budget_high_expansion_flags_a_button_that_fits_by_default() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, default_stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(!default_stdout.contains("OkButton"), "{default_stdout}");
+
+    let (code, stdout, _) = run_budget(&[menu.to_str().unwrap(), "--expansion", "500"]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("OkButton"), "{stdout}");
+}
+
+#[test]
+fn budget_default_font_size_flag_affects_results() {
+    let menu = budget_fixture("menu.tscn");
+    let (_, default_stdout, _) = run_budget(&[menu.to_str().unwrap()]);
+    assert!(!default_stdout.contains("NoOverrideButton"), "{default_stdout}");
+
+    let (code, stdout, _) = run_budget(&[menu.to_str().unwrap(), "--default-font-size", "24"]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("NoOverrideButton"), "{stdout}");
+}
+
+#[test]
+fn budget_scene_with_only_undeterminable_controls_yields_no_warnings_and_exit_zero() {
+    let scene = budget_fixture("undeterminable.tscn");
+    let (code, stdout, stderr) = run_budget(&[scene.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.trim().is_empty(), "{stdout}");
+}
+
+#[test]
+fn budget_undeterminable_scene_json_is_an_empty_array() {
+    let scene = budget_fixture("undeterminable.tscn");
+    let (code, stdout, _) = run_budget(&[scene.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "[]");
+}
+
+#[test]
+fn budget_reports_an_error_and_exit_2_for_a_missing_file() {
+    let (code, _stdout, stderr) = run_budget(&[fixtures_dir().join("does_not_exist.tscn").to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("error"), "{stderr}");
+}
+
+#[test]
+fn budget_help_documents_expansion_default_font_size_json_and_their_defaults() {
+    let (code, stdout, _) = run_budget(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("--expansion"), "{stdout}");
+    assert!(stdout.contains("--default-font-size"), "{stdout}");
+    assert!(stdout.contains("--json"), "{stdout}");
+    assert!(stdout.contains("40"), "{stdout}");
+    assert!(stdout.contains("16"), "{stdout}");
 }

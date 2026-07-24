@@ -1,0 +1,33 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Menu" type="Control"]
+
+[node name="VBox" type="VBoxContainer" parent="."]
+
+[node name="SettingsButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(70, 32)
+text = "Settings"
+
+[node name="OkButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(100, 32)
+text = "OK"
+
+[node name="LanguageButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(30, 32)
+text = "設定"
+
+[node name="NoOverrideButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(50, 32)
+text = "Menu"
+
+[node name="HintLabel" type="Label" parent="VBox"]
+custom_minimum_size = Vector2(40, 60)
+autowrap_mode = 3
+text = "This text would definitely overflow a forty pixel wide label if wrapping were not disabled"
+
+[node name="Banner" type="Label" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = -8.0
+offset_bottom = -8.0
+text = "This label stretches to fill its parent so its width cannot be statically known"

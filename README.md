@@ -19,15 +19,16 @@ information no one asked it to touch.
   small mutation layer (`src/edit.rs`) for surgical, span-exact edits. No
   required dependencies beyond the standard library.
 - `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`,
-  `sg i18n extract`) built on top of scenegraph-core. `src/nodegraph.rs`
-  holds the node-graph reconstruction shared by `src/rules.rs` (structural
-  checks) and `src/i18n/` (the `sg i18n` command family). Depends on
-  `clap` for argument parsing and `toml` for `sg.toml` configuration (see
-  "Configuration (`sg.toml`)" below - the one deliberate exception to
-  keeping the dependency footprint small, since hand-rolling TOML's
-  quoting/escaping/comment rules is not worth it for one config file
-  format); everything else (diffing, JSON output, the PO/CSV writers in
-  `sg i18n extract`) is still hand-rolled.
+  `sg i18n extract`, `sg i18n budget`) built on top of scenegraph-core.
+  `src/nodegraph.rs` holds the node-graph reconstruction shared by
+  `src/rules.rs` (structural checks) and `src/i18n/` (the `sg i18n`
+  command family). Depends on `clap` for argument parsing and `toml` for
+  `sg.toml` configuration (see "Configuration (`sg.toml`)" below - the
+  one deliberate exception to keeping the dependency footprint small,
+  since hand-rolling TOML's quoting/escaping/comment rules is not worth
+  it for one config file format); everything else (diffing, JSON output,
+  the PO/CSV writers in `sg i18n extract`, the text-width estimation in
+  `sg i18n budget`) is still hand-rolled.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
   suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
@@ -36,7 +37,8 @@ information no one asked it to touch.
   that resolve `res://` paths against disk: `fixtures/engine_project/` for
   `missing-ext-resource-path` and `sg check --engine` (see below),
   `fixtures/case_mismatch_project/` for `ext-resource-path-case-mismatch`,
-  and `fixtures/i18n_project/` for `sg i18n extract`.
+  `fixtures/i18n_project/` for `sg i18n extract`, and
+  `fixtures/i18n_budget_project/` for `sg i18n budget`.
 
 ## Design
 
@@ -153,6 +155,11 @@ sg fix path/to/scene.tscn --keep-unused
 sg i18n extract path/to/scene_dir/
 sg i18n extract path/to/scene.tscn --format csv
 sg i18n extract path/to/scene_dir/ --output strings.po
+
+# Statically predict UI text overflow before translation (see
+# "sg i18n budget" below).
+sg i18n budget path/to/scene_dir/
+sg i18n budget path/to/scene.tscn --expansion 60 --json
 ```
 
 ## `sg check`
@@ -411,7 +418,7 @@ Two properties are enforced by the test suite in
 ## `sg i18n extract`
 
 The first of a planned `sg i18n` command family for localization tooling
-(`extract` today; `budget`, `shots`, and `check` are planned next - see
+(`extract` and `budget` today; `shots` and `check` are planned next - see
 `crates/sg/src/i18n/mod.rs`'s module doc comment). `extract` solves two
 common localization pains: spreadsheet round-tripping (translators
 usually work in a spreadsheet or a PO editor, not a `.tscn` file) and
@@ -512,6 +519,129 @@ strings found - is not a failure), `2` at least one input file failed to
 read or parse (matching `sg check`/`sg fix`'s parse-error exit code;
 files that did scan cleanly still contribute their strings to the
 output), `1` the rendered output could not be written to `--output`.
+
+## `sg i18n budget`
+
+The flagship of the `sg i18n` family: statically predicts UI text overflow
+- a `Button`/`Label`/`LineEdit` whose translated text will not fit its
+control - **before** anything is sent for translation, by reading each
+control's dimensions and font size straight out of the `.tscn` source,
+without launching the Godot engine at all.
+
+```sh
+sg i18n budget path/to/scene_dir/
+sg i18n budget path/to/scene.tscn --expansion 60
+sg i18n budget path/to/scene_dir/ --default-font-size 20 --json
+```
+
+### Design philosophy: approximate, but it always runs
+
+This command is deliberately built as a linter, not an oracle, per its
+owning design directive: **static overflow detection is worth more
+running always and catching ~90% of incidents than being 99% accurate and
+never actually run.** Like a linter, a rare false positive gets caught
+in code review; a tool nobody runs prevents nothing. Two consequences
+follow directly from that:
+
+- **Font metrics are approximate by design.** `estimate_text_width`
+  classifies each character and multiplies a small, hand-picked
+  em-relative width table by the font size - it never reads an actual
+  font file. CJK/full-width characters (Unicode ranges: CJK Unified
+  Ideographs, Hiragana, Katakana, Hangul Syllables, CJK
+  Symbols/Punctuation, Halfwidth/Fullwidth Forms) count as `1.0` em;
+  Latin/proportional characters fall into one of a few buckets tuned
+  against how proportional fonts actually render (values in em units, at
+  font-size 1):
+
+  | Bucket | Characters | Width (em) |
+  |---|---|---|
+  | Full-width / CJK | any character in the ranges above | `1.0` |
+  | Very narrow | `i l j f t I . , ' ! \| :` | `0.3` |
+  | Narrow | `r s` and space | `0.35` |
+  | Wide | `m w` | `0.9` |
+  | Uppercase (default) | any other uppercase ASCII letter | `0.65` |
+  | Digit | `0`-`9` | `0.55` |
+  | Lowercase (default) / unknown | any other lowercase ASCII letter, or anything else (accented Latin, Cyrillic, emoji, generic punctuation, ...) | `0.5` |
+
+  `width_px = sum(char_width_em(c) for c in text) * font_size_px`.
+
+- **Where a control's available width cannot be statically determined -
+  it stretches to fill a parent/container - the control is skipped
+  entirely, never guessed at.** A false alarm on every stretchy label
+  would train users to ignore the tool. This is exactly what keeps the
+  false-positive rate down while still catching the case that matters
+  most: fixed-size buttons, which is where overflow actually bites.
+
+### Available-width precedence
+
+For each control, in order:
+
+1. `custom_minimum_size = Vector2(W, H)` with `W > 0` -> available width
+   is `W`. A Button/Label will not shrink below this, and in a fixed
+   layout cannot grow past it either, so text exceeding `W` is the
+   canonical overflow case this tool targets.
+2. Otherwise, fixed offsets with non-stretching anchors: resolve
+   `anchor_left`/`anchor_right` (an absent one defaults to Godot's own
+   default of `0.0` - most scenes only write an anchor when it differs
+   from that), or fall back to `anchors_preset` when neither anchor is
+   written at all. If the anchors do not stretch horizontally
+   (`anchor_left == anchor_right`, or an `anchors_preset` that is not one
+   of the four horizontally-stretching presets - `PRESET_TOP_WIDE`,
+   `PRESET_BOTTOM_WIDE`, `PRESET_VCENTER_WIDE`, `PRESET_FULL_RECT`) and
+   both `offset_left` and `offset_right` are present, available width is
+   `|offset_right - offset_left|`.
+3. Otherwise: **undeterminable - the control is skipped, not warned
+   about.**
+
+`autowrap_mode` set to anything other than off (`0`) means the text wraps
+vertically instead of overflowing horizontally, so such a control is
+skipped regardless of the above. Font size comes from the node's own
+`theme_override_font_sizes/font_size` if present, else `--default-font-size`.
+
+### Which strings are checked
+
+Only `text` and `placeholder_text` - the single-line, fixed-width-prone
+properties, read off the same node-graph walk `sg i18n extract` uses
+(`crates/sg/src/nodegraph.rs`), so the two commands never disagree about a
+node's path. `tooltip_text` is never a candidate (Godot's tooltip popup
+always sizes to fit its content, so a width budget is meaningless for
+it). `title`/`dialog_text` (`Window`/`AcceptDialog`) are skipped in v1:
+their sizing is windowing-system-managed, not a fixed control rect the
+way a `Button`/`Label` inside a layout is.
+
+### Overflow decision
+
+For each candidate string: `source_px = estimate_text_width(text,
+font_size)`, `predicted_px = source_px * (1 + expansion / 100)`. A
+warning is emitted when `predicted_px` **strictly exceeds**
+`available_px` (an exact match does not warn). `--expansion <PERCENT>`
+(default `40`) is the assumed translation-expansion factor - a common
+rule of thumb for English-source UI text (German/Finnish/etc. commonly
+run 30-50% longer); tune it per project. `--default-font-size <PX>`
+(default `16`, Godot's own default `Control` theme font size) is used
+whenever a control sets no font-size override of its own.
+
+Text output matches `sg check`'s `file:line: severity [code] message`
+shape, issue code `i18n-text-overflow`, severity always `warning`:
+
+```
+fixtures/i18n_budget_project/menu.tscn:9: warning [i18n-text-overflow] "Settings" in Button "VBox/SettingsButton" may overflow: predicted ~76px (source ~54px +40%) exceeds ~70px available (custom_minimum_size, font_size 16)
+```
+
+`--json` emits an array of objects with `file`, `line`, `severity`,
+`code`, `string`, `node_path`, `node_type`, `property`, `available_px`,
+`source_px`, `predicted_px`, `expansion_percent`, `font_size`, and
+`width_source` (`"custom_minimum_size"` or `"offset_left/offset_right"`).
+Every numeric field is rounded to the nearest integer for display in both
+text and JSON output - the overflow decision itself always compares
+full-precision numbers; rounding only happens at render time.
+
+### Exit codes
+
+`0` no overflow risk found, `1` at least one found, `2` at least one input
+file failed to read or parse (matching `sg check`/`sg i18n extract`'s
+parse-error exit code, and taking priority over `1` the same way it does
+there).
 
 ## Development
 

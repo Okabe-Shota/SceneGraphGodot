@@ -1,0 +1,16 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="Root" type="Control"]
+
+[node name="StretchLabel" type="Label" parent="."]
+anchor_right = 1.0
+text = "No fixed width here so this must never be flagged no matter how long it runs"
+
+[node name="PresetStretchLabel" type="Label" parent="."]
+anchors_preset = 15
+offset_left = 8.0
+offset_right = -8.0
+text = "Full rect preset must be skipped even though offsets are present right here"
+
+[node name="NoGeometryButton" type="Button" parent="."]
+text = "Also undeterminable because no custom_minimum_size or offsets are set at all"

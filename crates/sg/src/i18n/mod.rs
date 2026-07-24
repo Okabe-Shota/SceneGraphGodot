@@ -1,22 +1,23 @@
 //! Shared foundation for the `sg i18n` command family.
 //!
-//! `sg i18n extract` (this PR) is the first of a planned set -
-//! `sg i18n budget` (control-geometry / layout-overflow checks),
-//! `sg i18n shots` (per-screen screenshots for translator review), and
-//! `sg i18n check` (CI gate combining the above) are expected to follow.
-//! All of them start from the same question - "for every node in these
-//! scene files, what is its path, its type, and which screen does it
-//! belong to?" - so that walk lives here, once, as [`scan_document`]. Today
-//! only [`extract`] reads anything off the result (the v1 translatable-
-//! text properties); a future `budget` is expected to read control
-//! geometry (offset/anchor properties) from the exact same per-node walk,
-//! without re-deriving node paths a second, possibly divergent way.
+//! `sg i18n extract` and `sg i18n budget` are the first two of a planned
+//! set - `sg i18n shots` (per-screen screenshots for translator review)
+//! and `sg i18n check` (CI gate combining the above) are expected to
+//! follow. All of them start from the same question - "for every node in
+//! these scene files, what is its path, its type, and which screen does
+//! it belong to?" - so that walk lives here, once, as [`scan_document`]
+//! (`extract`'s translatable-text properties) and, with the same
+//! `build_node_graph`-based approach applied to control-geometry
+//! properties instead, in [`budget::scan`]. Both commands therefore always
+//! agree on what a node's path is - neither re-derives it a second,
+//! possibly divergent way.
 //!
 //! Node path / instanced-node resolution itself is not reimplemented here
 //! either: it is the exact same [`crate::nodegraph`] logic `crate::rules`
 //! uses for its own structural checks, so `sg check` and `sg i18n` can
 //! never disagree about what a node's path is.
 
+pub mod budget;
 pub mod extract;
 
 use std::path::{Path, PathBuf};

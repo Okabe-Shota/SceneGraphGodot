@@ -110,6 +110,29 @@ enum I18nCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Statically predict UI text overflow from control geometry and font
+    /// size read directly out of scene files - before anything is sent
+    /// for translation, without launching the engine. See README.md,
+    /// "sg i18n budget".
+    Budget {
+        /// Files or directories to scan (directories are searched
+        /// recursively for *.tscn/*.tres, same as `sg check`).
+        paths: Vec<PathBuf>,
+        /// Percent the estimated source-text width is expanded by before
+        /// comparing it against a control's available width, approximating
+        /// translated text typically running longer than English source
+        /// text.
+        #[arg(long, default_value_t = i18n::budget::DEFAULT_EXPANSION_PERCENT)]
+        expansion: u32,
+        /// Font size in px assumed for a control that sets no
+        /// `theme_override_font_sizes/font_size` of its own. 16 is
+        /// Godot's own default theme font size.
+        #[arg(long, default_value_t = i18n::budget::DEFAULT_FONT_SIZE_PX)]
+        default_font_size: u32,
+        /// Emit a machine-readable JSON array instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -131,6 +154,12 @@ fn main() -> ExitCode {
         } => cmd_fix(&paths, dry_run, keep_unused),
         Command::I18n { command } => match command {
             I18nCommand::Extract { paths, format, output } => i18n::extract::run(&paths, format, output.as_deref()),
+            I18nCommand::Budget {
+                paths,
+                expansion,
+                default_font_size,
+                json,
+            } => i18n::budget::run(&paths, expansion, default_font_size, json),
         },
     }
 }
