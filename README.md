@@ -19,17 +19,19 @@ information no one asked it to touch.
   small mutation layer (`src/edit.rs`) for surgical, span-exact edits. No
   required dependencies beyond the standard library.
 - `crates/sg` - a CLI (`sg parse`, `sg roundtrip`, `sg check`, `sg fix`,
-  `sg i18n extract`, `sg i18n budget`, `sg i18n check`) built on top of
-  scenegraph-core. `src/nodegraph.rs` holds the node-graph reconstruction
-  shared by `src/rules.rs` (structural checks) and `src/i18n/` (the `sg
-  i18n` command family). Depends on `clap` for argument parsing and
-  `toml` for `sg.toml` configuration (see "Configuration (`sg.toml`)"
-  below - the one deliberate exception to keeping the dependency
-  footprint small, since hand-rolling TOML's quoting/escaping/comment
-  rules is not worth it for one config file format); everything else
-  (diffing, JSON output, the PO/CSV writers and reader in `sg i18n
-  extract`, the text-width estimation in `sg i18n budget`) is still
-  hand-rolled.
+  `sg i18n extract`, `sg i18n budget`, `sg i18n check`, `sg i18n shots`)
+  built on top of scenegraph-core. `src/nodegraph.rs` holds the node-graph
+  reconstruction shared by `src/rules.rs` (structural checks) and
+  `src/i18n/` (the `sg i18n` command family); `src/engine.rs` holds the
+  headless-Godot process/timeout machinery shared by `sg check --engine`
+  and `sg i18n shots --screenshots`. Depends on `clap` for argument
+  parsing and `toml` for `sg.toml` configuration (see "Configuration
+  (`sg.toml`)" below - the one deliberate exception to keeping the
+  dependency footprint small, since hand-rolling TOML's quoting/escaping/
+  comment rules is not worth it for one config file format); everything
+  else (diffing, JSON output, the PO/CSV writers and reader in `sg i18n
+  extract`, the text-width estimation in `sg i18n budget`, the HTML/base64
+  generation in `sg i18n shots`) is still hand-rolled.
 - `fixtures/` - realistic `.tscn`/`.tres` sample files used by the test
   suite, `fixtures/invalid/` for error-path (parse failure) tests,
   `fixtures/broken/` for structurally valid but semantically broken files
@@ -38,8 +40,9 @@ information no one asked it to touch.
   that resolve `res://` paths against disk: `fixtures/engine_project/` for
   `missing-ext-resource-path` and `sg check --engine` (see below),
   `fixtures/case_mismatch_project/` for `ext-resource-path-case-mismatch`,
-  `fixtures/i18n_project/` for `sg i18n extract` and `sg i18n check`
-  (including its `translations.de.po` fixture), and
+  `fixtures/i18n_project/` for `sg i18n extract`, `sg i18n check`, and
+  `sg i18n shots` (including its `translations.de.po` fixture and
+  `html_escaping.tscn`, used to prove HTML escaping end-to-end), and
   `fixtures/i18n_budget_project/` for `sg i18n budget`.
 
 ## Design
@@ -162,6 +165,12 @@ sg i18n extract path/to/scene_dir/ --output strings.po
 # "sg i18n budget" below).
 sg i18n budget path/to/scene_dir/
 sg i18n budget path/to/scene.tscn --expansion 60 --json
+
+# Generate a self-contained, translator-facing HTML review file (see
+# "sg i18n shots" below). Context only by default; --screenshots is
+# opt-in and best-effort.
+sg i18n shots path/to/scene_dir/ --output translators.html
+sg i18n shots path/to/scene_dir/ --output translators.html --screenshots --godot-path .godot-bin/Godot_v4.7.1-stable_win64.exe
 ```
 
 ## `sg check`
@@ -766,6 +775,114 @@ matches every other `sg`/`sg i18n` command's parse-error exit code, and
 clap's own usage-error exit code (both already `2` in this codebase) - a
 gate-usage error and a file error are not distinguishable by exit code
 alone, exactly like a plain clap argument-parsing error already is.
+
+## `sg i18n shots`
+
+The translator-facing deliverable of the `sg i18n` family: a single
+self-contained HTML file ("translators.html") with one row per
+translatable string occurrence and everything a translator needs to
+translate it in context - the source string, the scene it came from, the
+node's path and type, the screen (scene root name), the property, and a
+`res://`-or-file reference - so a translator can open one file, offline,
+in any browser, and see every string with full context in one place.
+
+```sh
+# Context only (default): no engine, no screenshots, always reliable.
+sg i18n shots path/to/scene_dir/ --output translators.html
+
+# Best-effort screenshots, opt-in.
+sg i18n shots path/to/scene_dir/ --output translators.html --screenshots --godot-path .godot-bin/Godot_v4.7.1-stable_win64.exe
+```
+
+### `--output <FILE.html>` (required)
+
+Where the generated HTML is written. There is no stdout mode (unlike `sg
+i18n extract`) - the output is a full HTML document meant to be opened in
+a browser, not piped. Omitting `--output` is a clap usage error (exit code
+`2`, same as every other `sg`/`sg i18n` command's usage-error convention).
+
+### Context (always on, no engine needed)
+
+Reuses `crate::i18n::scan` exactly - the same walk `sg i18n extract`/`sg
+i18n check` already use - grouped by scene (one `<section>` per scene,
+heading: screen name + `res://`-or-file reference) and rendered as a table
+of every string found in it: source text, node path, node type, property,
+and a `res_path`-or-`scene_path` + `:node_path` reference (via the exact
+same computation `sg i18n extract`'s PO/CSV output uses, so the reference
+column here always matches what a translator sees in an extracted PO
+file's `#:` comment). Scenes are emitted sorted by `(scene_path, line)` -
+deterministic regardless of scan order, so a re-run over unchanged input
+produces byte-identical output. Every string, node path, and file path is
+HTML-escaped (`&`, `<`, `>`, `"`, `'`); a string's embedded newline (e.g. a
+multi-line `dialog_text`) renders as a visible `<br>` line break rather
+than collapsing the way a raw newline would in HTML. This half needs
+nothing beyond a parse - no engine, no display, no GPU - and is the
+acceptance bar for this command: it is fully reliable on its own, with
+`--screenshots` off (the default).
+
+A scene with no translatable strings at all - or no scenes given - still
+produces a valid HTML document, with a "No translatable strings were
+found" message instead of any scene sections.
+
+### `--screenshots` (opt-in, best-effort)
+
+Attempts to capture one screenshot per scene, embedded directly into the
+HTML as a `data:image/png;base64,...` URI (via a small hand-rolled base64
+encoder - no new dependency, no external image file). Off by default:
+without this flag, `sg i18n shots` never launches an engine at all.
+
+**Honest constraint: Godot's `--headless` flag uses a dummy rendering
+driver and cannot actually produce an image.** A real screenshot needs a
+display/GPU context, which is not guaranteed to exist in CI or on a
+headless server - this is a property of how Godot's headless mode works,
+not a bug in this tool, and no amount of extra code here changes it. This
+was verified directly against a real local Godot 4.7.1 binary while
+building this feature: the generated capture script loads the scene and
+instantiates it successfully, but retrieving a frame from the root
+viewport's texture fails inside Godot's own dummy rendering backend
+(`Parameter "t" is null` in `texture_2d_get`), which the script catches
+and reports as `"rendering unavailable in headless mode"`.
+
+Given that constraint, `--screenshots` is designed so **no failure here
+ever fails the command**: a missing/unresolvable Godot binary, a scene
+that fails to load, no renderer in a headless environment, a timeout, or a
+capture/read error all collapse to a per-scene "not captured: `<reason>`"
+note in the HTML instead. `sg i18n shots` still exits `0` and still writes
+a fully useful, context-only page for every scene whose screenshot could
+not be captured - "not captured" is an expected, reported outcome, never a
+command failure. The summary line in the generated HTML's header reports
+how many scenes were captured vs. not, when `--screenshots` was given.
+
+Mechanically, this reuses the exact same engine plumbing `sg check
+--engine` already has - `find_godot_binary`, `group_by_project`,
+`run_with_timeout` from `src/engine.rs` - rather than a second
+implementation: a generated GDScript is run per Godot project (one launch
+covers every scene under that project, same amortization as `--engine`),
+loads each scene, instantiates it, attempts to grab a frame and save it as
+a PNG, and reports one `SG-SHOT-RESULT` line per scene through the same
+kind of tab-separated, noise-tolerant protocol `--engine`'s validator
+script uses. Node highlighting (drawing attention to the specific node a
+string came from, within a captured screenshot) is not implemented - a
+possible future addition once real capture is viable in more
+environments, not something worth blocking this feature on given the
+rendering constraint above.
+
+### `--godot-path <PATH>` / `--engine-timeout <SECS>`
+
+Only meaningful with `--screenshots`; same resolution order, defaults, and
+behavior as `sg check --engine --godot-path` / `--engine-timeout` - see
+"`sg check --engine`" above.
+
+### Exit codes
+
+`0` every input file scanned cleanly and the HTML was written - regardless
+of how many translatable strings were found (zero is not a failure) and
+regardless of whether any screenshot was actually captured (a "not
+captured" result is not a failure). `2` at least one input file failed to
+read or parse (matching `sg check`/`sg i18n extract`'s parse-error exit
+code), or `--output` was not given (clap's own usage-error exit code,
+already `2` elsewhere in this codebase). `1` the HTML could not be written
+to `--output` (e.g. an unwritable path).
 
 ## Development
 

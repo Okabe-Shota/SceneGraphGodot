@@ -1,0 +1,12 @@
+[gd_scene load_steps=1 format=3]
+
+[node name="EscapeDemo" type="Control"]
+
+[node name="ExitLabel" type="Label" parent="."]
+text = "Save & <Exit>"
+
+[node name="ConfirmButton" type="Button" parent="."]
+tooltip_text = "Say \"hi\""
+
+[node name="ConfirmDialog" type="AcceptDialog" parent="."]
+dialog_text = "Confirm?\nAre you sure?"

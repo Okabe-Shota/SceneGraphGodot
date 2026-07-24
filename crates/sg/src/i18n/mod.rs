@@ -1,18 +1,22 @@
 //! Shared foundation for the `sg i18n` command family.
 //!
-//! `sg i18n extract`, `sg i18n budget`, and `sg i18n check` are the first
-//! three of a planned set - `sg i18n shots` (per-screen screenshots for
-//! translator review) is expected to follow. All of them start from the
-//! same question - "for every node in these scene files, what is its
-//! path, its type, and which screen does it belong to?" - so that walk
-//! lives here, once, as [`scan_document`] (`extract`'s translatable-text
-//! properties) and, with the same `build_node_graph`-based approach
-//! applied to control-geometry properties instead, in [`budget::scan`].
-//! `check` is a CI gate combining `budget`'s overflow detection (reused
-//! exactly, not reimplemented - see [`check`]'s module doc comment) with
-//! its own untranslated-string gate built on this same [`scan`]. All
-//! three therefore always agree on what a node's path is - none re-derives
-//! it a second, possibly divergent way.
+//! `sg i18n extract`, `sg i18n budget`, `sg i18n check`, and `sg i18n
+//! shots` all start from the same question - "for every node in these
+//! scene files, what is its path, its type, and which screen does it
+//! belong to?" - so that walk lives here, once, as [`scan_document`]
+//! (`extract`'s translatable-text properties) and, with the same
+//! `build_node_graph`-based approach applied to control-geometry
+//! properties instead, in [`budget::scan`]. `check` is a CI gate combining
+//! `budget`'s overflow detection (reused exactly, not reimplemented - see
+//! [`check`]'s module doc comment) with its own untranslated-string gate
+//! built on this same [`scan`]. `shots` renders this same [`scan`]'s
+//! output as a single self-contained, translator-facing HTML file
+//! ("translators.html"), optionally attempting a best-effort screenshot
+//! per scene via [`crate::engine`]'s process/timeout machinery - see
+//! [`shots`]'s module doc comment for the honest headless-rendering
+//! constraint that makes screenshots opt-in and best-effort rather than
+//! guaranteed. All four therefore always agree on what a node's path is -
+//! none re-derives it a second, possibly divergent way.
 //!
 //! Node path / instanced-node resolution itself is not reimplemented here
 //! either: it is the exact same [`crate::nodegraph`] logic `crate::rules`
@@ -22,6 +26,7 @@
 pub mod budget;
 pub mod check;
 pub mod extract;
+pub mod shots;
 
 use std::path::{Path, PathBuf};
 

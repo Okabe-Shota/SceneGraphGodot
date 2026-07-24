@@ -643,3 +643,194 @@ fn check_help_documents_all_flags_and_their_defaults() {
     assert!(stdout.contains("40"), "{stdout}");
     assert!(stdout.contains("16"), "{stdout}");
 }
+
+// -----------------------------------------------------------------------
+// sg i18n shots
+// -----------------------------------------------------------------------
+
+fn run_shots(args: &[&str]) -> (i32, String, String) {
+    let output = sg()
+        .arg("i18n")
+        .arg("shots")
+        .args(args)
+        .output()
+        .expect("failed to run sg i18n shots");
+    (
+        output.status.code().expect("no exit code"),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+#[test]
+fn shots_writes_a_self_contained_html_file_with_expected_context() {
+    let dir = fresh_temp_dir("shots-basic");
+    let out_file = dir.join("translators.html");
+    let scene = i18n_fixture("main_menu.tscn");
+
+    let (code, stdout, stderr) = run_shots(&[scene.to_str().unwrap(), "--output", out_file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.is_empty(), "shots writes to --output, not stdout: {stdout}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    assert!(html.starts_with("<!doctype html>"), "{html}");
+    assert!(html.contains("<meta charset=\"utf-8\">"), "{html}");
+    assert!(html.contains("MainMenu"), "{html}");
+    assert!(html.contains("Welcome"), "{html}");
+    assert!(html.contains("Start Game"), "{html}");
+    assert!(html.contains("Begin your adventure"), "{html}");
+    assert!(html.contains("Enter your name"), "{html}");
+    assert!(html.contains("VBox/StartButton"), "{html}");
+    assert!(html.contains("res://main_menu.tscn"), "{html}");
+    assert!(html.contains("6 string(s) across 1 scene(s)"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_escapes_html_special_characters_in_source_strings_and_node_paths() {
+    let dir = fresh_temp_dir("shots-escaping");
+    let out_file = dir.join("translators.html");
+    let scene = i18n_fixture("html_escaping.tscn");
+
+    let (code, _stdout, stderr) = run_shots(&[scene.to_str().unwrap(), "--output", out_file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    // "Save & <Exit>" must appear escaped, never raw.
+    assert!(html.contains("Save &amp; &lt;Exit&gt;"), "{html}");
+    assert!(
+        !html.contains("Save & <Exit>"),
+        "raw unescaped text leaked into the HTML: {html}"
+    );
+    // Say "hi" (decoded from the tscn's \"-escaped source) must appear
+    // HTML-quote-escaped.
+    assert!(html.contains("Say &quot;hi&quot;"), "{html}");
+    // The dialog's embedded newline renders as a visible line break.
+    assert!(html.contains("Confirm?<br>"), "{html}");
+    assert!(html.contains("Are you sure?"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_missing_output_flag_is_a_usage_error() {
+    let scene = i18n_fixture("main_menu.tscn");
+    let (code, stdout, stderr) = run_shots(&[scene.to_str().unwrap()]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("--output"), "{stderr}");
+}
+
+#[test]
+fn shots_reports_an_error_and_exit_2_for_a_missing_scene_file() {
+    let dir = fresh_temp_dir("shots-missing-scene");
+    let out_file = dir.join("translators.html");
+    let (code, _stdout, stderr) = run_shots(&[
+        fixtures_dir().join("does_not_exist.tscn").to_str().unwrap(),
+        "--output",
+        out_file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("error"), "{stderr}");
+    // Still produces a (best-effort) HTML file, per the other i18n
+    // commands' "still write whatever was produced" convention.
+    assert!(out_file.exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_on_a_scene_with_no_translatable_strings_yields_a_valid_html_with_no_strings_state() {
+    let dir = fresh_temp_dir("shots-empty");
+    let out_file = dir.join("translators.html");
+    let scene = i18n_fixture("empty.tscn");
+
+    let (code, _stdout, stderr) = run_shots(&[scene.to_str().unwrap(), "--output", out_file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    assert!(html.starts_with("<!doctype html>"), "{html}");
+    assert!(html.contains("No translatable strings were found"), "{html}");
+    assert!(html.contains("0 string(s) across 0 scene(s)"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_recurses_into_a_directory_argument() {
+    let dir = fresh_temp_dir("shots-dir");
+    let out_file = dir.join("translators.html");
+
+    let (code, _stdout, stderr) = run_shots(&[
+        fixtures_dir().join("i18n_project").to_str().unwrap(),
+        "--output",
+        out_file.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    assert!(html.contains("Welcome"), "{html}");
+    assert!(html.contains("Save &amp; &lt;Exit&gt;"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_without_screenshots_flag_never_launches_the_engine_and_omits_screenshot_markup() {
+    let dir = fresh_temp_dir("shots-no-engine");
+    let out_file = dir.join("translators.html");
+    let scene = i18n_fixture("main_menu.tscn");
+
+    // No --godot-path, no SG_GODOT, and no --screenshots: if this command
+    // tried to launch an engine at all, an unresolvable Godot binary would
+    // be the very first thing to fail. It must not even try.
+    let (code, _stdout, stderr) = run_shots(&[scene.to_str().unwrap(), "--output", out_file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    assert!(!html.contains("Screenshot not captured"), "{html}");
+    assert!(!html.contains("Screenshots:"), "{html}");
+    assert!(!html.contains("<img"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_screenshots_flag_with_an_unresolvable_godot_path_still_succeeds_with_not_captured_rows() {
+    let dir = fresh_temp_dir("shots-bad-godot");
+    let out_file = dir.join("translators.html");
+    let scene = i18n_fixture("main_menu.tscn");
+    let missing_godot = dir.join("does-not-exist-godot.exe");
+
+    let (code, stdout, stderr) = run_shots(&[
+        scene.to_str().unwrap(),
+        "--output",
+        out_file.to_str().unwrap(),
+        "--screenshots",
+        "--godot-path",
+        missing_godot.to_str().unwrap(),
+    ]);
+    // The key graceful-fallback behavior: an unresolvable engine binary
+    // never fails sg i18n shots itself.
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let html = fs::read_to_string(&out_file).unwrap();
+    assert!(html.contains("Screenshot not captured"), "{html}");
+    assert!(html.contains("does not point to an executable file"), "{html}");
+    assert!(!html.contains("<img"), "{html}");
+    // Every string is still present - context-only fallback, not an empty
+    // page.
+    assert!(html.contains("Welcome"), "{html}");
+    assert!(html.contains("Start Game"), "{html}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shots_help_documents_output_screenshots_godot_path_and_engine_timeout() {
+    let (code, stdout, _) = run_shots(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("--output"), "{stdout}");
+    assert!(stdout.contains("--screenshots"), "{stdout}");
+    assert!(stdout.contains("--godot-path"), "{stdout}");
+    assert!(stdout.contains("--engine-timeout"), "{stdout}");
+}

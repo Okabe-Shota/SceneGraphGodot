@@ -179,6 +179,37 @@ enum I18nCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Generate a single self-contained HTML file for translator review:
+    /// one row per translatable string with full context (scene, node
+    /// path, node type, screen, property, res:// reference), and,
+    /// optionally, a best-effort screenshot of the scene it came from.
+    /// See README.md, "sg i18n shots".
+    Shots {
+        /// Files or directories to scan (directories are searched
+        /// recursively for *.tscn/*.tres, same as `sg check`).
+        paths: Vec<PathBuf>,
+        /// Write the generated HTML to this file. Required.
+        #[arg(long)]
+        output: PathBuf,
+        /// Best-effort, opt-in: attempt to capture a screenshot of each
+        /// scene via a headless Godot process. Off by default - without
+        /// it, the HTML is generated with context only, no engine
+        /// launched. Godot's --headless mode uses a dummy rendering
+        /// driver and cannot always produce an image; any failure
+        /// degrades to a "not captured" note per scene rather than
+        /// failing the command. See README.md, "sg i18n shots".
+        #[arg(long)]
+        screenshots: bool,
+        /// Path to the Godot executable used by --screenshots. Same
+        /// resolution order as `sg check --engine --godot-path`.
+        #[arg(long)]
+        godot_path: Option<PathBuf>,
+        /// Per-project timeout, in seconds, for the headless Godot
+        /// process launched by --screenshots. Same default as `sg check
+        /// --engine`.
+        #[arg(long, default_value_t = 30)]
+        engine_timeout: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -223,6 +254,13 @@ fn main() -> ExitCode {
                 no_overflow,
                 json,
             ),
+            I18nCommand::Shots {
+                paths,
+                output,
+                screenshots,
+                godot_path,
+                engine_timeout,
+            } => i18n::shots::run(&paths, &output, screenshots, godot_path.as_deref(), engine_timeout),
         },
     }
 }

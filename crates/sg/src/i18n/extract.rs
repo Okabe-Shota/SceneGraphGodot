@@ -65,8 +65,11 @@ pub fn run(paths: &[PathBuf], format: Format, output: Option<&Path>) -> ExitCode
 /// The reference this record's occurrence resolves to: `res_path` when
 /// known, otherwise `scene_path` (forward-slash-separated regardless of
 /// host path separator), followed by `:node_path` - e.g.
-/// `res://ui/main_menu.tscn:VBox/StartButton`.
-fn reference(record: &TranslatableString) -> String {
+/// `res://ui/main_menu.tscn:VBox/StartButton`. `pub(crate)` rather than
+/// private: `sg i18n shots` reuses this exact computation for its own
+/// per-string reference column, so the whole `sg i18n` family always
+/// agrees on what a string's reference string looks like.
+pub(crate) fn reference(record: &TranslatableString) -> String {
     let base = record
         .res_path
         .clone()
